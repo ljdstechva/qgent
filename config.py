@@ -40,6 +40,27 @@ DEFAULTS = {
     K_REDUCE_MOTION: False,
 }
 
+# Neither Claude Code 2.1.214 nor Codex CLI 0.144.1 exposes a headless model
+# enumeration command. Keep this as the single source of truth for model
+# pickers (including the Doctor UI). Every entry was accepted by its CLI in
+# the Goal 4 one-token probes preserved under tests/evidence/.
+MODEL_IDS_BY_BACKEND = {
+    "claude": (
+        "sonnet",
+        "haiku",
+        "opus",
+        "fable",
+        "claude-sonnet-5",
+        "claude-haiku-4-5-20251001",
+        "claude-opus-4-8",
+        "claude-fable-5",
+    ),
+    "codex": (
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+    ),
+}
+
 _BOOL_KEYS = {K_VERIFIER, K_REDUCE_MOTION}
 _INT_KEYS = {K_MAX_RESULT, K_EXEC_TIMEOUT}
 
@@ -69,6 +90,11 @@ def set(key, value):  # noqa: A001 (shadowing builtin is fine for a config modul
     s = _settings()
     s.setValue(key, value)
     s.endGroup()
+
+
+def model_ids(backend):
+    """Return the curated model IDs for a backend as an immutable tuple."""
+    return MODEL_IDS_BY_BACKEND.get(str(backend or "").lower(), ())
 
 
 # --- CLI autodetection -----------------------------------------------------

@@ -28,7 +28,6 @@ class SettingsDialog(QDialog):
         self.backend = QComboBox()
         self.backend.addItem("Claude Code (Claude Pro/Max)", "claude")
         self.backend.addItem("Codex (ChatGPT) — single-agent", "codex")
-        self.backend.currentIndexChanged.connect(self._update_cli_row)
         form.addRow("Backend", self.backend)
 
         cli_row = QHBoxLayout()
@@ -40,24 +39,29 @@ class SettingsDialog(QDialog):
         cli_row.addWidget(browse)
         self.cli_label = QLabel("Claude CLI path")
         form.addRow(self.cli_label, cli_row)
+        self.cli_status = QLabel("CLI not found — install it or choose its executable.")
+        self.cli_status.setWordWrap(True)
+        self.cli_status.setStyleSheet("color: #b26a00; font-size: 11px;")
+        form.addRow("", self.cli_status)
+        self.cli_path.textChanged.connect(self._refresh_cli_status)
         outer.addWidget(gb)
 
         # models group
         gm = QGroupBox("Models")
         mform = QFormLayout(gm)
-        self.model_sup = QLineEdit()
-        self.model_worker = QLineEdit()
-        self.model_light = QLineEdit()
+        self.model_sup = self._model_combo()
+        self.model_worker = self._model_combo()
+        self.model_light = self._model_combo()
         mform.addRow("Supervisor / geoprocessor / cartographer", self.model_sup)
         mform.addRow("Worker (override)", self.model_worker)
         mform.addRow("Light (data-scout, qa-verifier)", self.model_light)
-        note = QLabel("Aliases like <i>sonnet</i>, <i>haiku</i>, <i>opus</i> or full "
-                      "model ids. Subagent models come from their .md frontmatter; "
-                      "these apply to the main session.")
+        note = QLabel("Choose a model offered for the selected backend, or type a "
+                      "custom model id. Existing custom values remain valid.")
         note.setWordWrap(True)
         note.setStyleSheet("color: palette(mid); font-size: 11px;")
         mform.addRow(note)
         outer.addWidget(gm)
+        self.backend.currentIndexChanged.connect(self._update_backend_rows)
 
         # safety group
         gs = QGroupBox("Safety & execution")
@@ -95,12 +99,35 @@ class SettingsDialog(QDialog):
         buttons.rejected.connect(self.reject)
         outer.addWidget(buttons)
 
+    @staticmethod
+    def _model_combo():
+        combo = QComboBox()
+        combo.setEditable(True)
+        combo.setInsertPolicy(QComboBox.NoInsert)
+        return combo
+
+    def _update_backend_rows(self):
+        self._update_cli_row()
+        self._populate_model_combos()
+
     def _update_cli_row(self):
         is_codex = self.backend.currentData() == "codex"
         self.cli_label.setText("Codex CLI path" if is_codex else "Claude CLI path")
         detected = (config.detect_codex() if is_codex else config.detect_claude())
-        if not self.cli_path.text():
-            self.cli_path.setText(detected)
+        self.cli_path.setText(detected)
+        self._refresh_cli_status()
+
+    def _refresh_cli_status(self):
+        self.cli_status.setVisible(not bool(self.cli_path.text().strip()))
+
+    def _populate_model_combos(self):
+        models = config.model_ids(self.backend.currentData())
+        for combo in (self.model_sup, self.model_worker, self.model_light):
+            current = combo.currentText()
+            combo.clear()
+            combo.addItems(models)
+            if current:
+                combo.setCurrentText(current)
 
     def _browse_cli(self):
         start = self.cli_path.text() or os.path.expanduser("~")
@@ -111,15 +138,11 @@ class SettingsDialog(QDialog):
     def _load(self):
         idx = self.backend.findData(config.get(config.K_BACKEND))
         self.backend.setCurrentIndex(max(0, idx))
-        if config.get(config.K_BACKEND) == "codex":
-            self.cli_path.setText(config.get(config.K_CODEX_PATH) or config.detect_codex())
-        else:
-            self.cli_path.setText(config.get(config.K_CLAUDE_PATH) or config.detect_claude())
-        self._update_cli_row()
+        self._update_backend_rows()
 
-        self.model_sup.setText(config.get(config.K_MODEL_SUPERVISOR))
-        self.model_worker.setText(config.get(config.K_MODEL_WORKER))
-        self.model_light.setText(config.get(config.K_MODEL_LIGHT))
+        self.model_sup.setCurrentText(config.get(config.K_MODEL_SUPERVISOR))
+        self.model_worker.setCurrentText(config.get(config.K_MODEL_WORKER))
+        self.model_light.setCurrentText(config.get(config.K_MODEL_LIGHT))
 
         pidx = self.perm.findData(config.get(config.K_PERMISSION_MODE))
         self.perm.setCurrentIndex(max(0, pidx))
@@ -135,9 +158,12 @@ class SettingsDialog(QDialog):
             config.set(config.K_CODEX_PATH, self.cli_path.text().strip())
         else:
             config.set(config.K_CLAUDE_PATH, self.cli_path.text().strip())
-        config.set(config.K_MODEL_SUPERVISOR, self.model_sup.text().strip() or "sonnet")
-        config.set(config.K_MODEL_WORKER, self.model_worker.text().strip() or "sonnet")
-        config.set(config.K_MODEL_LIGHT, self.model_light.text().strip() or "haiku")
+        config.set(config.K_MODEL_SUPERVISOR,
+                   self.model_sup.currentText().strip() or "sonnet")
+        config.set(config.K_MODEL_WORKER,
+                   self.model_worker.currentText().strip() or "sonnet")
+        config.set(config.K_MODEL_LIGHT,
+                   self.model_light.currentText().strip() or "haiku")
         config.set(config.K_PERMISSION_MODE, self.perm.currentData())
         config.set(config.K_VERIFIER, self.verifier.isChecked())
         config.set(config.K_EXEC_TIMEOUT, self.timeout.value())
