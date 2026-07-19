@@ -21,24 +21,28 @@ import os
 import secrets
 import time
 
-from qgis.PyQt.QtCore import Qt, QTimer
+from qgis.PyQt.QtCore import Qt, QTimer, QCoreApplication
 from qgis.PyQt.QtWidgets import (
     QDockWidget, QWidget, QVBoxLayout, QHBoxLayout, QScrollArea, QLabel,
     QToolButton, QFrame,
 )
-from qgis.core import QgsLayerTreeGroup, QgsLayerTreeLayer
+from qgis.core import (
+    QgsApplication, QgsLayerTreeGroup, QgsLayerTreeLayer, QgsMessageLog,
+    QgsProject,
+)
 
 from .. import config
 from . import theme
 from .animations import fade_in, smooth_scroll_to_bottom, staggered, ThinkingDots
 from .widgets import (
     MessageBubble, ToolChip, SubagentChip, ApprovalCard, ChatInput,
-    SendStopButton, SuggestionChip, ContextStrip,
+    SendStopButton, SuggestionChip, ContextStrip, StatusNote,
 )
 from .settings_dialog import SettingsDialog
 from ..bridge.qgis_socket_server import BridgeServer
 from ..bridge.main_thread_executor import MainThreadExecutor
 from ..context.project_snapshot import build_context_block, snapshot_layer
+from ..history import HistoryStore, bounded_json_value, clipped_text
 
 _SUGGESTIONS = [
     "What CRS is this project?",
@@ -66,6 +70,17 @@ class ChatDock(QDockWidget):
         self.hero = None
         self._layer_tree_view = None
         self._layer_selection_model = None
+        self.history_store = None
+        self._history_state = None
+        self._history_replaying = False
+        self._backend_kind = None
+        self._last_tool_id = None
+        self._last_tool_name = ""
+        self._last_tool_args = {}
+        self._last_tool_finished = True
+        self._subagent_history = {}
+        self._approval_history = {}
+        self._active_turn = None
 
         # token coalescing
         self._stream_buf = ""
@@ -78,8 +93,11 @@ class ChatDock(QDockWidget):
         self._connect_layer_selection()
         self._start_bridge()
         self._write_mcp_config()
+        self._init_history()
         self._build_backend()
-        self._post_welcome()
+        restored = self._restore_history(self._history_state)
+        if not restored:
+            self._post_welcome()
 
     # ======================================================================
     # UI
@@ -290,6 +308,165 @@ class ChatDock(QDockWidget):
         self.dots.halt()
 
     # ======================================================================
+    # Persistent project history
+    # ======================================================================
+    def _init_history(self):
+        """Open the current project's profile-local history without failing UI."""
+        try:
+            self.history_store = HistoryStore(
+                QgsApplication.qgisSettingsDirPath(),
+                QgsProject.instance().fileName(),
+            )
+            self._history_state = self.history_store.load()
+            warning = self._history_state.get("warning") or ""
+            if warning:
+                self._log_history_warning(warning)
+        except Exception as exc:
+            self.history_store = None
+            self._history_state = {"session": {}, "records": []}
+            self._log_history_warning(
+                f"History startup failed: {type(exc).__name__}: {exc}")
+
+    def _history_append(self, kind, **fields):
+        if self._history_replaying or self.history_store is None:
+            return None
+        try:
+            return self.history_store.append(kind, **fields)
+        except Exception as exc:
+            self._log_history_warning(
+                f"History append failed: {type(exc).__name__}: {exc}")
+            return None
+
+    def _history_update_session(self):
+        if self.history_store is None or self.backend is None:
+            return
+        try:
+            self.history_store.update_session(
+                self._backend_kind or config.get(config.K_BACKEND),
+                self._current_model(),
+                self.backend.session_id,
+            )
+        except Exception as exc:
+            self._log_history_warning(
+                f"History session update failed: {type(exc).__name__}: {exc}")
+
+    def _current_model(self):
+        return (config.get(config.K_MODEL_SUPERVISOR)
+                if (self._backend_kind or config.get(config.K_BACKEND)) == "claude"
+                else "")
+
+    @staticmethod
+    def _display_timestamp(value):
+        text = str(value or "")
+        return text[11:16] if len(text) >= 16 and text[10:11] == "T" else text
+
+    @staticmethod
+    def _record_text(record, key, default=""):
+        value = record.get(key, default)
+        if isinstance(value, dict) and value.get("truncated"):
+            return str(value.get("preview") or default)
+        return str(value if value is not None else default)
+
+    def _restore_history(self, state):
+        """Replay capped records into final/static widgets without re-appending."""
+        state = state or {}
+        records = list(state.get("records") or [])
+        session = dict(state.get("session") or {})
+        if self.backend is not None:
+            session_id = session.get("session_id")
+            if session_id and session.get("backend") == self._backend_kind:
+                self.backend.session_id = session_id
+                self.session_label.setText(
+                    f"● {self._backend_kind} · {str(session_id)[:8]}")
+            else:
+                self.backend.session_id = None
+            self._history_update_session()
+        if not records:
+            return False
+
+        tool_widgets = {}
+        subagent_widgets = {}
+        approval_widgets = {}
+        self._history_replaying = True
+        try:
+            for index, record in enumerate(records):
+                kind = record.get("kind")
+                stamp = self._display_timestamp(record.get("t"))
+                if kind == "user":
+                    self._add_user_message(
+                        self._record_text(record, "text"),
+                        record.get("tags") or [], persist=False, timestamp=stamp)
+                elif kind == "assistant":
+                    text = self._record_text(record, "text")
+                    if record.get("style") == "status":
+                        self._add_status_note(text, persist=False)
+                    else:
+                        bubble = MessageBubble("assistant", self.t)
+                        bubble.set_timestamp(stamp)
+                        bubble.set_text(text)
+                        self._add_widget(bubble, animate=False)
+                elif kind == "error":
+                    self._add_error(
+                        self._record_text(record, "text"), persist=False,
+                        timestamp=stamp)
+                elif kind == "tool":
+                    tool_id = str(record.get("tool_id") or f"legacy-{index}")
+                    event = record.get("event") or "finished"
+                    chip = tool_widgets.get(tool_id)
+                    if chip is None:
+                        chip = ToolChip(
+                            self._record_text(record, "name", "tool"),
+                            record.get("args") or {}, self.t)
+                        tool_widgets[tool_id] = chip
+                        self._add_widget(chip, animate=False)
+                    if event == "finished":
+                        chip.set_static_result(
+                            self._record_text(
+                                record, "result", "(no result captured)"))
+                elif kind == "subagent":
+                    sub_id = str(record.get("subagent_id") or f"legacy-{index}")
+                    chip = subagent_widgets.get(sub_id)
+                    if chip is None:
+                        chip = SubagentChip(
+                            self._record_text(record, "name", "subagent"), self.t)
+                        subagent_widgets[sub_id] = chip
+                        self._add_widget(chip, animate=False)
+                    if record.get("event") == "finished":
+                        chip.set_static("finished", record.get("elapsed_s"))
+                elif kind == "approval":
+                    approval_id = str(
+                        record.get("approval_id") or f"legacy-{index}")
+                    card = approval_widgets.get(approval_id)
+                    if card is None:
+                        card = ApprovalCard(
+                            self._record_text(record, "code"),
+                            record.get("reasons") or [], self.t)
+                        card.set_static_outcome(None)
+                        approval_widgets[approval_id] = card
+                        self._add_widget(card, animate=False)
+                    if record.get("event") == "decided":
+                        card.set_static_outcome(bool(record.get("approved")))
+                if index and index % 25 == 0:
+                    QCoreApplication.processEvents()
+
+            for chip in tool_widgets.values():
+                if not chip.is_static_state():
+                    chip.set_static_result("(turn interrupted before result)")
+            for chip in subagent_widgets.values():
+                if not chip.is_static_state():
+                    chip.set_static("interrupted")
+        finally:
+            self._history_replaying = False
+        QTimer.singleShot(0, lambda: smooth_scroll_to_bottom(self.scroll))
+        return True
+
+    def _log_history_warning(self, message):
+        try:
+            QgsMessageLog.logMessage(str(message), "QGent")
+        except Exception:
+            pass
+
+    # ======================================================================
     # Bridge + backend  (unchanged plumbing)
     # ======================================================================
     def _start_bridge(self):
@@ -350,8 +527,15 @@ class ChatDock(QDockWidget):
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(existing.rstrip() + "\n" + block)
 
-    def _build_backend(self):
+    def _build_backend(self, preserve_session=True):
+        previous_kind = self._backend_kind
+        previous_session = None
         if self.backend is not None:
+            previous_session = self.backend.session_id
+            try:
+                self.backend.blockSignals(True)
+            except (AttributeError, RuntimeError):
+                pass
             try:
                 self.backend.cancel()
             except Exception:
@@ -360,6 +544,7 @@ class ChatDock(QDockWidget):
             self.backend = None
 
         backend_kind = config.get(config.K_BACKEND)
+        self._backend_kind = backend_kind
         cli_path = config.active_cli_path()
         env = {}  # CLI inherits system env; bridge env goes via mcp-config
         if backend_kind == "codex":
@@ -379,6 +564,9 @@ class ChatDock(QDockWidget):
         self.backend.done.connect(self._on_done)
         self.backend.error.connect(self._on_error)
         self.backend.busy_changed.connect(self._on_busy_changed)
+        if (preserve_session and previous_session
+                and previous_kind == backend_kind):
+            self.backend.session_id = previous_session
 
     # ======================================================================
     # Sending
@@ -414,10 +602,17 @@ class ChatDock(QDockWidget):
                       "ttft_ms": None, "tool_calls": 0, "delegations": 0,
                       "backend": backend,
                       "model": config.get(config.K_MODEL_SUPERVISOR) if backend == "claude" else ""}
+        self._history_update_session()
         self.input.clear()
         self._add_user_message(text, selection["tags"])
         self._current_bubble = None
         self._last_tool_chip = None
+        self._last_tool_id = None
+        self._last_tool_name = ""
+        self._last_tool_args = {}
+        self._last_tool_finished = True
+        self._subagent_chips = {}
+        self._subagent_history = {}
         self._show_thinking()
 
         try:
@@ -425,6 +620,12 @@ class ChatDock(QDockWidget):
                 self.iface, selected_layers=selection["layers"])
         except Exception:
             context_block = ""
+        self._active_turn = {
+            "text": text,
+            "context_block": context_block,
+            "resumed": bool(self.backend.session_id),
+            "fallback_attempted": False,
+        }
         self.backend.send(text, context_block)
 
     def on_stop(self):
@@ -433,14 +634,30 @@ class ChatDock(QDockWidget):
             self._end_stream()
             self._hide_thinking()
             self._set_activity("Stopped.")
+            self._add_status_note("Turn stopped.")
+            self._active_turn = None
             self._finish_perf()
 
     def new_session(self):
+        if self.history_store is not None:
+            try:
+                self.history_store.delete()
+            except Exception as exc:
+                self._log_history_warning(
+                    f"Could not clear history: {type(exc).__name__}: {exc}")
+                self._set_activity("Could not clear chat history.")
+                return
         if self.backend is not None and self.backend.is_busy():
+            try:
+                self.backend.blockSignals(True)
+            except (AttributeError, RuntimeError):
+                pass
             self.backend.cancel()
             self._finish_perf()
         # Fresh session id; keep the same bridge (port/token still valid).
-        self._build_backend()
+        self._active_turn = None
+        self._build_backend(preserve_session=False)
+        self._history_update_session()
         self._clear_messages()
         self.session_label.setText("new session")
         self._post_welcome()
@@ -451,6 +668,7 @@ class ChatDock(QDockWidget):
             # Backend or model choice may have changed — rebuild + rewrite config.
             self._write_mcp_config()
             self._build_backend()
+            self._history_update_session()
             self._set_activity("Settings applied.")
 
     # ======================================================================
@@ -476,12 +694,15 @@ class ChatDock(QDockWidget):
             self._stream_buf = ""
             smooth_scroll_to_bottom(self.scroll)
 
-    def _end_stream(self):
+    def _end_stream(self, persist=True):
         """Flush pending text and finish the streaming bubble."""
         self._flush_timer.stop()
         self._flush_tokens()
-        if self._current_bubble is not None:
-            self._current_bubble.set_streaming(False)
+        bubble = self._current_bubble
+        if bubble is not None:
+            bubble.set_streaming(False)
+            if persist and bubble.text():
+                self._history_append("assistant", text=bubble.text())
         self._current_bubble = None
 
     # ======================================================================
@@ -492,14 +713,33 @@ class ChatDock(QDockWidget):
             self._perf["tool_calls"] += 1
         self._end_stream()
         self._hide_thinking()
+        if self._last_tool_chip is not None and not self._last_tool_finished:
+            self._last_tool_chip.mark_done_without_result()
+            self._history_append(
+                "tool", event="finished", tool_id=self._last_tool_id,
+                name=self._last_tool_name, args=self._last_tool_args,
+                result="(no result captured)")
+            self._last_tool_finished = True
         chip = ToolChip(name, args, self.t)
         self._last_tool_chip = chip
+        self._last_tool_id = secrets.token_hex(8)
+        self._last_tool_name = str(name)
+        self._last_tool_args = bounded_json_value(args)
+        self._last_tool_finished = False
         self._add_widget(chip)
+        self._history_append(
+            "tool", event="started", tool_id=self._last_tool_id,
+            name=self._last_tool_name, args=self._last_tool_args)
         self._set_activity(f"Running {name.replace('mcp__qgis__', '')}…")
 
     def _on_tool_result(self, text):
         if self._last_tool_chip is not None:
             self._last_tool_chip.set_result(text)
+            self._history_append(
+                "tool", event="finished", tool_id=self._last_tool_id,
+                name=self._last_tool_name, args=self._last_tool_args,
+                result=clipped_text(text))
+            self._last_tool_finished = True
 
     def _on_subagent_event(self, name, status):
         self._end_stream()
@@ -509,35 +749,108 @@ class ChatDock(QDockWidget):
             self._hide_thinking()
             chip = SubagentChip(name, self.t)
             self._subagent_chips[name] = chip
+            subagent_id = secrets.token_hex(8)
+            self._subagent_history[name] = {
+                "id": subagent_id,
+                "started": time.monotonic(),
+                "finished": False,
+            }
             self._add_widget(chip)
+            self._history_append(
+                "subagent", event="started", subagent_id=subagent_id,
+                name=str(name))
             self._set_activity(f"{name} working…")
         elif status == "finished":
             chip = self._subagent_chips.get(name)
             if chip is not None:
                 chip.set_finished()
+            info = self._subagent_history.get(name) or {}
+            if not info.get("finished"):
+                elapsed = max(0.0, time.monotonic() - info.get(
+                    "started", time.monotonic()))
+                self._history_append(
+                    "subagent", event="finished",
+                    subagent_id=info.get("id") or secrets.token_hex(8),
+                    name=str(name), elapsed_s=round(elapsed, 3))
+                info["finished"] = True
 
     def _on_session_started(self, session_id):
         short = session_id[:8]
         backend = config.get(config.K_BACKEND)
         self.session_label.setText(f"● {backend} · {short}")
+        self._history_update_session()
 
     def _on_done(self, _result):
         self._end_stream()
         self._hide_thinking()
         if self._last_tool_chip is not None:
             self._last_tool_chip.mark_done_without_result()
-        for chip in self._subagent_chips.values():
+            if not self._last_tool_finished:
+                self._history_append(
+                    "tool", event="finished", tool_id=self._last_tool_id,
+                    name=self._last_tool_name, args=self._last_tool_args,
+                    result="(no result captured)")
+                self._last_tool_finished = True
+        for name, chip in self._subagent_chips.items():
             if chip._shimmer_pos is not None:  # never got its "finished" event
                 chip.set_finished()
+                info = self._subagent_history.get(name) or {}
+                if not info.get("finished"):
+                    elapsed = max(0.0, time.monotonic() - info.get(
+                        "started", time.monotonic()))
+                    self._history_append(
+                        "subagent", event="finished",
+                        subagent_id=info.get("id") or secrets.token_hex(8),
+                        name=str(name), elapsed_s=round(elapsed, 3))
+                    info["finished"] = True
         self._set_activity("Ready.")
+        self._active_turn = None
         self._finish_perf()
 
     def _on_error(self, message):
         self._end_stream()
         self._hide_thinking()
+        if self._should_retry_missing_session(message):
+            self._active_turn["fallback_attempted"] = True
+            self._active_turn["resumed"] = False
+            self.backend.session_id = None
+            self._history_update_session()
+            self.session_label.setText("new session")
+            self._add_status_note("Started a fresh agent session.")
+            self._set_activity("Starting a fresh agent session…")
+            QTimer.singleShot(0, self._retry_after_missing_session)
+            return
         self._add_error(message)
         self._set_activity("Error.")
+        self._active_turn = None
         self._finish_perf()
+
+    def _should_retry_missing_session(self, message):
+        turn = self._active_turn
+        if (not turn or not turn.get("resumed")
+                or turn.get("fallback_attempted")):
+            return False
+        text = str(message or "").lower()
+        patterns = (
+            "session not found", "session id not found", "no session found",
+            "no conversation found", "conversation not found",
+            "thread not found", "unknown session", "invalid session id",
+            "failed to resume", "could not resume", "session does not exist",
+            "thread does not exist",
+        )
+        if any(pattern in text for pattern in patterns):
+            return True
+        subject = any(word in text for word in (
+            "session", "conversation", "thread"))
+        missing = any(phrase in text for phrase in (
+            "not found", "does not exist", "unknown", "invalid"))
+        return subject and missing
+
+    def _retry_after_missing_session(self):
+        turn = self._active_turn
+        if turn is None or self.backend is None or self.backend.is_busy():
+            return
+        self.backend.send(turn["text"], turn["context_block"])
 
     def _finish_perf(self):
         turn = self._perf
@@ -573,11 +886,22 @@ class ChatDock(QDockWidget):
     # ======================================================================
     def on_approval_requested(self, ap):
         self._end_stream()
-        card = ApprovalCard(ap.get("code", ""), ap.get("reasons", []), self.t)
+        approval_id = secrets.token_hex(8)
+        code = clipped_text(ap.get("code", ""))
+        reasons = [clipped_text(reason, 1000)
+                   for reason in (ap.get("reasons") or [])]
+        card = ApprovalCard(code, reasons, self.t)
+        self._approval_history[approval_id] = card
+        self._history_append(
+            "approval", event="requested", approval_id=approval_id,
+            code=code, reasons=reasons)
 
         def decide(approved):
             ap["approved"] = approved
             ap["event"].set()
+            self._history_append(
+                "approval", event="decided", approval_id=approval_id,
+                code=code, reasons=reasons, approved=bool(approved))
 
         card.decided.connect(decide)
         self._add_widget(card)
@@ -586,25 +910,40 @@ class ChatDock(QDockWidget):
     # ======================================================================
     # Message list helpers
     # ======================================================================
-    def _add_user_message(self, text, tags=None):
+    def _add_user_message(self, text, tags=None, persist=True, timestamp=None):
         bubble = MessageBubble("user", self.t)
         bubble.set_tags(tags)
         self._add_widget(bubble)
+        if timestamp is not None:
+            bubble.set_timestamp(timestamp)
         bubble.set_text(text)
+        if persist:
+            self._history_append("user", text=str(text), tags=list(tags or []))
 
-    def _add_error(self, text):
+    def _add_error(self, text, persist=True, timestamp=None):
         bubble = MessageBubble("assistant", self.t)
         bubble.set_error()
         self._add_widget(bubble)
+        if timestamp is not None:
+            bubble.set_timestamp(timestamp)
         bubble.set_text("**⚠ " + text + "**")
+        if persist:
+            self._history_append("error", text=str(text))
 
-    def _add_widget(self, widget):
+    def _add_status_note(self, text, persist=True):
+        note = StatusNote(text, self.t)
+        self._add_widget(note)
+        if persist:
+            self._history_append("assistant", style="status", text=str(text))
+
+    def _add_widget(self, widget, animate=True):
         if self.hero is not None and self.hero.isVisible():
             self.hero.hide()
         # Insert before the trailing stretch.
         self.msg_layout.insertWidget(self.msg_layout.count() - 1, widget)
-        fade_in(widget)
-        smooth_scroll_to_bottom(self.scroll)
+        if animate and not self._history_replaying:
+            fade_in(widget)
+            smooth_scroll_to_bottom(self.scroll)
 
     def _clear_messages(self):
         while self.msg_layout.count() > 1:
@@ -615,7 +954,13 @@ class ChatDock(QDockWidget):
         self.hero = None
         self._current_bubble = None
         self._last_tool_chip = None
+        self._last_tool_id = None
+        self._last_tool_name = ""
+        self._last_tool_args = {}
+        self._last_tool_finished = True
         self._subagent_chips.clear()
+        self._subagent_history.clear()
+        self._approval_history.clear()
         self._stream_buf = ""
 
     # ======================================================================
@@ -624,10 +969,8 @@ class ChatDock(QDockWidget):
     def _post_welcome(self):
         self._show_hero()
         if not config.active_cli_path():
-            self._add_error(
-                "No agent CLI found. Install the Claude Code CLI "
-                "(`npm i -g @anthropic-ai/claude-code`) and log in with your "
-                "Claude subscription, then open ⚙ Settings to set its path.")
+            self._set_activity(
+                "No agent CLI found — open ⚙ Settings to configure one.")
 
     def _show_hero(self):
         hero = QWidget()
@@ -679,6 +1022,10 @@ class ChatDock(QDockWidget):
             self._layer_selection_model = None
             self._layer_tree_view = None
         if self.backend is not None:
+            try:
+                self.backend.blockSignals(True)
+            except (AttributeError, RuntimeError):
+                pass
             try:
                 self.backend.cancel()
             except Exception:

@@ -69,6 +69,16 @@ chips. Destructive code (file writes, deletes, `commitChanges`, overwrites) pops
 an inline **Approve / Deny** card — configurable in Settings
 (*ask-destructive* / *ask-always* / *auto*).
 
+### Chat history
+
+QGent restores the current project's conversation after QGIS restarts,
+including message layer tags and final, inert tool/subagent/approval states.
+History is JSON Lines under the active QGIS profile at
+`<QGIS settings dir>/qgent/history/<project-key>.jsonl`; saved projects use a
+SHA-256 key derived from the project filename and unsaved projects use
+`unsaved.jsonl`. The **✚ New** button is the only normal action that deletes
+the current project's active history and resets its CLI session.
+
 ## Safety
 
 - Every `execute_pyqgis` payload is AST-scanned for destructive patterns
@@ -92,7 +102,7 @@ is best-effort. **Claude Code is the reference backend.**
 
 ```
 qgis_chat_agent/
-├── metadata.txt, __init__.py, plugin.py, config.py
+├── metadata.txt, __init__.py, plugin.py, config.py, history.py
 ├── ui/            chat_dock.py, widgets.py, settings_dialog.py
 ├── agent/         backend_base.py, claude_code_backend.py, codex_backend.py, stream_parser.py
 ├── bridge/        qgis_socket_server.py, main_thread_executor.py, safety.py, mcp_stdio_bridge.py

@@ -153,6 +153,10 @@ class MessageBubble(QWidget):
     def tags(self):
         return self._tags
 
+    def set_timestamp(self, text):
+        """Set a persisted display timestamp when restoring history."""
+        self.stamp.setText(str(text or ""))
+
     def _toggle_caret(self):
         self._caret_on = not self._caret_on
         self._render()
@@ -200,6 +204,8 @@ class ToolChip(QFrame):
         self._expanded = False
         self._raw = _short_json(args)
         self._result_raw = ""
+        self._history_static = False
+        self._finished = False
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(10, 5, 10, 5)
@@ -250,8 +256,9 @@ class ToolChip(QFrame):
         self.setCursor(Qt.PointingHandCursor)
 
     # -- results ------------------------------------------------------------
-    def set_result(self, text):
+    def set_result(self, text, animate=True):
         self._result_raw = text
+        self._finished = True
         ok = not _looks_like_error(text)
         self.spinner.stop()
         self.spinner.hide()
@@ -260,15 +267,24 @@ class ToolChip(QFrame):
         self.state_lbl.setStyleSheet(
             f"color: {color}; font-weight: 700; background: transparent;")
         self.state_lbl.show()
-        fade_in(self.state_lbl, 150)
+        if animate:
+            fade_in(self.state_lbl, 150)
         md = ("**Arguments**\n```json\n" + self._raw + "\n```\n\n"
               "**Result**\n```\n" + _truncate(text, 1500) + "\n```")
         self.details.setMarkdown(md)
 
     def mark_done_without_result(self):
         """Turn finished but no explicit result routed here."""
-        if self.spinner.isVisible():
+        if not self._finished:
             self.set_result("(no result captured)")
+
+    def set_static_result(self, text):
+        """Restore a final inert state without leaving a live spinner."""
+        self._history_static = True
+        self.set_result(text or "(no result captured)", animate=False)
+
+    def is_static_state(self):
+        return self._history_static and self._finished and self.spinner.isHidden()
 
     # -- expand/collapse ----------------------------------------------------
     def mousePressEvent(self, event):
@@ -317,6 +333,7 @@ class SubagentChip(QFrame, ShimmerMixin):
         lay.addStretch(1)
 
         self._init_shimmer(tokens.qcolor(tokens.accent))
+        self._history_static = False
 
     def set_finished(self):
         self.stop_shimmer()
@@ -325,6 +342,25 @@ class SubagentChip(QFrame, ShimmerMixin):
         self.label.setText(
             f"{icon}  <b>{self.name}</b> · done "
             f"<span style='color:{self.t.text_muted}'>· {elapsed:.0f}s</span>")
+
+    def set_static(self, status="finished", elapsed_s=None):
+        """Restore a terminal subagent chip with no shimmer animation."""
+        self.stop_shimmer()
+        self._history_static = True
+        icon = self._ICONS.get(self.name, "🤖")
+        if status == "finished":
+            suffix = " · done"
+            if elapsed_s is not None:
+                try:
+                    suffix += f" · {float(elapsed_s):.0f}s"
+                except (TypeError, ValueError):
+                    pass
+        else:
+            suffix = " · interrupted"
+        self.label.setText(f"{icon}  <b>{self.name}</b>{suffix}")
+
+    def is_static_state(self):
+        return self._history_static and self._shimmer_pos is None
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -348,6 +384,7 @@ class ApprovalCard(QFrame):
 
         head = QLabel("⚠ <b>Approval required</b> — this code looks destructive:")
         head.setWordWrap(True)
+        self.head = head
         lay.addWidget(head)
 
         reason_txt = "\n".join(f"•  {r}" for r in reasons) \
@@ -377,6 +414,13 @@ class ApprovalCard(QFrame):
 
         self.approve_btn.clicked.connect(lambda: self._decide(True))
         self.deny_btn.clicked.connect(lambda: self._decide(False))
+        self._history_static = False
+        self._static_note = QLabel("")
+        self._static_note.setWordWrap(True)
+        self._static_note.setStyleSheet(
+            f"color: {tokens.text_muted}; background: transparent;")
+        self._static_note.hide()
+        lay.addWidget(self._static_note)
 
     def attention(self):
         """Border pulse — call after the card is added and visible."""
@@ -396,6 +440,42 @@ class ApprovalCard(QFrame):
         self.deny_btn.setEnabled(False)
         self.approve_btn.setText("✅ Approved" if approved else "🚫 Denied")
         self.decided.emit(approved)
+
+    def set_static_outcome(self, approved=None):
+        """Render a restored approval as an inert outcome note."""
+        self._history_static = True
+        self.approve_btn.setEnabled(False)
+        self.deny_btn.setEnabled(False)
+        self.approve_btn.hide()
+        self.deny_btn.hide()
+        if approved is True:
+            text = "✅ Approved · restored from chat history"
+            self.head.setText("✅ <b>Approved code action</b>")
+        elif approved is False:
+            text = "🚫 Denied · restored from chat history"
+            self.head.setText("🚫 <b>Denied code action</b>")
+        else:
+            text = "⚠ Approval not completed before the previous session ended"
+            self.head.setText("⚠ <b>Incomplete code approval</b>")
+        self._static_note.setText(text)
+        self._static_note.show()
+
+    def is_static_state(self):
+        return (self._history_static and not self.approve_btn.isVisible()
+                and not self.deny_btn.isVisible())
+
+
+class StatusNote(QLabel):
+    """Subtle inert line for session fallback and restored status events."""
+
+    def __init__(self, text, tokens, parent=None):
+        super().__init__(str(text), parent)
+        self.setObjectName("QgentHistoryNote")
+        self.setWordWrap(True)
+        self.setAlignment(Qt.AlignCenter)
+        self.setStyleSheet(
+            f"color: {tokens.text_muted}; background: transparent; "
+            "font-size: 10px; padding: 2px 6px;")
 
 
 # ===========================================================================
