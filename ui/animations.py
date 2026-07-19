@@ -5,8 +5,14 @@ All helpers are Qt5/Qt6-safe (via qgis.PyQt), self-contained, and honour the
 "reduce motion" setting: when reduced, every helper snaps straight to its end
 state so behaviour is identical minus the motion.
 
-Animation objects are parented to (or stored on) their widget so Python GC
-can't kill them mid-flight.
+Object-lifetime rules (the source of a real crash, keep them):
+  * Never combine ``DeleteWhenStopped`` with a stored wrapper that is later
+    method-called — Qt deletes the C++ object at finish and the next call
+    raises "wrapped C/C++ object has been deleted". Reusable animations
+    (scroll, height) are therefore persistent: created once, parented,
+    retargeted per call.
+  * Every callback that can fire after its widget was destroyed (new session
+    clears the message list mid-animation) is guarded with ``_alive``.
 """
 import math
 
@@ -16,11 +22,26 @@ from qgis.PyQt.QtCore import (
 from qgis.PyQt.QtGui import QColor, QPainter, QPen
 from qgis.PyQt.QtWidgets import QGraphicsOpacityEffect, QWidget
 
+try:
+    from qgis.PyQt import sip
+except ImportError:  # standalone PyQt5 (tests)
+    import sip
+
 from .. import config
 
 
 def motion_enabled():
     return not config.get(config.K_REDUCE_MOTION)
+
+
+def _alive(qobj):
+    """True if the wrapped C++ object behind ``qobj`` still exists."""
+    if qobj is None:
+        return False
+    try:
+        return not sip.isdeleted(qobj)
+    except TypeError:  # not a sip-wrapped object
+        return True
 
 
 # ---------------------------------------------------------------------------
@@ -32,11 +53,13 @@ def fade_in(widget, duration=180):
     The effect is removed on finish because QGraphicsOpacityEffect degrades
     QTextBrowser rendering quality if left installed.
     """
-    if not motion_enabled():
+    if not motion_enabled() or not _alive(widget):
         return
     eff = QGraphicsOpacityEffect(widget)
     eff.setOpacity(0.0)
     widget.setGraphicsEffect(eff)
+    # Parented to the widget → Qt keeps it alive and destroys it with the
+    # widget; no Python-side reference needed.
     anim = QPropertyAnimation(eff, b"opacity", widget)
     anim.setDuration(duration)
     anim.setStartValue(0.0)
@@ -44,46 +67,72 @@ def fade_in(widget, duration=180):
     anim.setEasingCurve(QEasingCurve.OutCubic)
 
     def _done():
-        widget.setGraphicsEffect(None)
+        if _alive(widget):
+            widget.setGraphicsEffect(None)
     anim.finished.connect(_done)
     anim.start(QPropertyAnimation.DeleteWhenStopped)
-    widget._qgent_fade = anim  # keep alive
 
 
 def animate_height(widget, start, end, duration=150, on_done=None):
-    """Animate ``maximumHeight`` (expand/collapse reveals)."""
+    """Animate ``maximumHeight`` (expand/collapse reveals).
+
+    One persistent animation per widget, retargeted on each call, so rapid
+    expand/collapse toggling can't stack conflicting animations or touch a
+    deleted one.
+    """
+    if not _alive(widget):
+        return
     if not motion_enabled():
         widget.setMaximumHeight(end)
         if on_done:
             on_done()
         return
-    anim = QPropertyAnimation(widget, b"maximumHeight", widget)
+    anim = getattr(widget, "_qgent_height", None)
+    if not _alive(anim):
+        anim = QPropertyAnimation(widget, b"maximumHeight", widget)
+        widget._qgent_height = anim
+    else:
+        anim.stop()
+        try:
+            anim.finished.disconnect()
+        except TypeError:
+            pass  # nothing connected
     anim.setDuration(duration)
     anim.setStartValue(start)
     anim.setEndValue(end)
     anim.setEasingCurve(QEasingCurve.InOutQuad)
     if on_done:
-        anim.finished.connect(on_done)
-    anim.start(QPropertyAnimation.DeleteWhenStopped)
-    widget._qgent_height = anim
+        def _done():
+            if _alive(widget):
+                on_done()
+        anim.finished.connect(_done)
+    anim.start()
 
 
 def smooth_scroll_to_bottom(scroll_area, duration=120):
-    """Animate the vertical scrollbar to max; retargets if already running."""
+    """Animate the vertical scrollbar to max; retargets if already running.
+
+    Uses ONE persistent QPropertyAnimation per scroll area (created lazily,
+    parented, KeepWhenStopped). The previous DeleteWhenStopped + stop-the-old
+    pattern crashed with "wrapped C/C++ object ... has been deleted" as soon
+    as two scrolls were >duration apart.
+    """
+    if not _alive(scroll_area):
+        return
     bar = scroll_area.verticalScrollBar()
     if not motion_enabled():
         bar.setValue(bar.maximum())
         return
-    old = getattr(scroll_area, "_qgent_scroll", None)
-    if old is not None:
-        old.stop()
-    anim = QPropertyAnimation(bar, b"value", scroll_area)
+    anim = getattr(scroll_area, "_qgent_scroll", None)
+    if not _alive(anim):
+        anim = QPropertyAnimation(bar, b"value", scroll_area)
+        anim.setEasingCurve(QEasingCurve.OutCubic)
+        scroll_area._qgent_scroll = anim
+    anim.stop()
     anim.setDuration(duration)
     anim.setStartValue(bar.value())
     anim.setEndValue(bar.maximum())
-    anim.setEasingCurve(QEasingCurve.OutCubic)
-    anim.start(QPropertyAnimation.DeleteWhenStopped)
-    scroll_area._qgent_scroll = anim
+    anim.start()
 
 
 def pulse_border(widget, base_qss_fn, color_hex, pulses=2, duration=600):
@@ -101,22 +150,33 @@ def pulse_border(widget, base_qss_fn, color_hex, pulses=2, duration=600):
     anim.setEasingCurve(QEasingCurve.Linear)
 
     def _tick(v):
+        if not _alive(widget):
+            anim.stop()
+            return
         # triangle wave 1 → 0.35 → 1 per pulse
         phase = abs(math.sin(math.pi * v))
         alpha = 0.35 + 0.65 * phase
         widget.setStyleSheet(base_qss_fn(alpha))
 
+    def _done():
+        if _alive(widget):
+            widget.setStyleSheet(base_qss_fn(1.0))
+
     anim.valueChanged.connect(_tick)
-    anim.finished.connect(lambda: widget.setStyleSheet(base_qss_fn(1.0)))
+    anim.finished.connect(_done)
     anim.start(QVariantAnimation.DeleteWhenStopped)
-    widget._qgent_pulse = anim
 
 
 def staggered(widgets, delay_step=80, duration=180):
-    """Fade widgets in one after another (suggestion chips)."""
+    """Fade widgets in one after another (suggestion chips).
+
+    The delayed timer may fire after the widget was destroyed (fast "new
+    session") — fade_in's own _alive guard makes that a no-op.
+    """
+    if not motion_enabled():
+        return
     for i, w in enumerate(widgets):
-        if motion_enabled():
-            QTimer.singleShot(i * delay_step, lambda w=w: fade_in(w, duration))
+        QTimer.singleShot(i * delay_step, lambda w=w: fade_in(w, duration))
 
 
 # ---------------------------------------------------------------------------
