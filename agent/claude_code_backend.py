@@ -58,6 +58,9 @@ class ClaudeCodeBackend(AgentBackend):
                 "--include-partial-messages",
                 "--model", config.get(config.K_MODEL_SUPERVISOR),
                 "--mcp-config", self.mcp_config_path,
+                "--strict-mcp-config",
+                "--setting-sources", "project",
+                "--settings", '{"env":{"ENABLE_TOOL_SEARCH":"false"}}',
                 "--allowedTools", _ALLOWED_TOOLS,
                 "--disallowedTools", _DISALLOWED_TOOLS]
         if self.session_id:
