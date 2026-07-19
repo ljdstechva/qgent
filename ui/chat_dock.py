@@ -353,9 +353,8 @@ class ChatDock(QDockWidget):
                 f"History session update failed: {type(exc).__name__}: {exc}")
 
     def _current_model(self):
-        return (config.get(config.K_MODEL_SUPERVISOR)
-                if (self._backend_kind or config.get(config.K_BACKEND)) == "claude"
-                else "")
+        backend = self._backend_kind or config.get(config.K_BACKEND)
+        return config.get_model_choice(backend, "supervisor")["model_id"]
 
     @staticmethod
     def _display_timestamp(value):
@@ -638,6 +637,7 @@ class ChatDock(QDockWidget):
         self.backend.session_started.connect(self._on_session_started)
         self.backend.done.connect(self._on_done)
         self.backend.error.connect(self._on_error)
+        self.backend.status_note.connect(self._on_backend_status_note)
         self.backend.busy_changed.connect(self._on_busy_changed)
         if (preserve_session and previous_session
                 and previous_kind == backend_kind):
@@ -964,6 +964,11 @@ class ChatDock(QDockWidget):
             self._show_thinking()
         else:
             self._hide_thinking()
+
+    def _on_backend_status_note(self, message):
+        self._add_status_note(str(message))
+        # A model-reset guard updates the per-backend key before emitting.
+        self._history_update_session()
 
     def _on_bridge_activity(self, tool):
         # Fires from the socket thread (queued); low-noise status hint.

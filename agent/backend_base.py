@@ -24,6 +24,8 @@ class AgentBackend(QObject):
     done = pyqtSignal(object)
     # a fatal error for this turn
     error = pyqtSignal(str)
+    # a non-fatal configuration/status note for the transcript
+    status_note = pyqtSignal(str)
     # coarse busy/idle state for the UI
     busy_changed = pyqtSignal(bool)
 

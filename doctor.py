@@ -24,26 +24,9 @@ from .history import HistoryStore, clipped_text
 
 DEFAULT_SOURCE_REPO = Path(r"D:\11 QGIS Agent\qgis_chat_agent")
 PROTECTED_RELATIVE = "claude_runtime/mcp-config.json"
-REPAIR_MODEL_SPECS = (
-    {
-        "backend": "codex",
-        "model": "gpt-5.6-sol",
-        "effort": "xhigh",
-        "label": "Codex · gpt-5.6-sol · xhigh",
-    },
-    {
-        "backend": "claude",
-        "model": "claude-opus-4-8",
-        "effort": "max",
-        "label": "Claude · opus-4.8 (claude-opus-4-8)",
-    },
-    {
-        "backend": "claude",
-        "model": "claude-fable-5",
-        "effort": "max",
-        "label": "Claude · fable-5 (claude-fable-5)",
-    },
-)
+# Compatibility name retained for Goal 5 callers; values are derived from the
+# one Goal 6 catalog in config.py so chat and repair lists cannot diverge.
+REPAIR_MODEL_SPECS = config.repair_model_specs()
 STALE_SESSION_PATTERNS = (
     "session not found", "session id not found", "no session found",
     "no conversation found", "conversation not found", "thread not found",
@@ -132,7 +115,7 @@ def repair_model_options(cli_paths=None):
         backend = spec["backend"]
         if not resolved.get(backend):
             continue
-        if spec["model"] not in config.model_ids(backend):
+        if spec["model"] not in config.accepted_model_ids(backend):
             continue
         item = dict(spec)
         item["cli_path"] = resolved[backend]

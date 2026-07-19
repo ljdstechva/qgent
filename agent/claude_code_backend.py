@@ -40,6 +40,8 @@ class ClaudeCodeBackend(AgentBackend):
         self._saw_text_delta = False
         # tool_use id -> subagent name, so we can emit "finished" on its result
         self._pending_subagents = {}
+        self.last_model_id = ""
+        self.last_model_was_custom = False
 
     # -- interface ----------------------------------------------------------
     def is_busy(self):
@@ -55,9 +57,15 @@ class ClaudeCodeBackend(AgentBackend):
         self._pending_subagents.clear()
         self.last_stderr = ""
 
+        model_choice = config.validate_model_choice("claude", "supervisor")
+        self.last_model_id = model_choice["model_id"]
+        self.last_model_was_custom = model_choice["custom"]
+        if model_choice["note"]:
+            self.status_note.emit(model_choice["note"])
+
         args = ["-p", "--output-format", "stream-json", "--verbose",
                 "--include-partial-messages",
-                "--model", config.get(config.K_MODEL_SUPERVISOR),
+                "--model", self.last_model_id,
                 "--mcp-config", self.mcp_config_path,
                 "--strict-mcp-config",
                 "--setting-sources", "project",

@@ -15,6 +15,7 @@ from qgis.PyQt.QtCore import QProcess, QProcessEnvironment
 
 from .backend_base import AgentBackend
 from .stream_parser import StreamJsonParser
+from .. import config
 
 
 class CodexBackend(AgentBackend):
@@ -24,6 +25,8 @@ class CodexBackend(AgentBackend):
         self.proc = None
         self.parser = StreamJsonParser()
         self._got_result = False
+        self.last_model_id = ""
+        self.last_model_was_custom = False
 
     def is_busy(self):
         return self.proc is not None and self.proc.state() != QProcess.NotRunning
@@ -36,10 +39,19 @@ class CodexBackend(AgentBackend):
         self._got_result = False
         self.last_stderr = ""
 
+        model_choice = config.validate_model_choice("codex", "supervisor")
+        self.last_model_id = model_choice["model_id"]
+        self.last_model_was_custom = model_choice["custom"]
+        if model_choice["note"]:
+            self.status_note.emit(model_choice["note"])
+
         if self.session_id:
-            args = ["exec", "resume", self.session_id, "--json"]
+            args = [
+                "exec", "resume", self.session_id,
+                "--model", self.last_model_id, "--json",
+            ]
         else:
-            args = ["exec", "--json"]
+            args = ["exec", "--model", self.last_model_id, "--json"]
 
         self.proc = QProcess(self)
         self.proc.setWorkingDirectory(self.runtime_dir)

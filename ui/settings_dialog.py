@@ -21,6 +21,7 @@ from ..doctor import (
 class SettingsDialog(QDialog):
     def __init__(self, parent=None, doctor_context=None):
         super().__init__(parent)
+        config.migrate_model_settings()
         self.doctor_context = dict(doctor_context or {})
         self.doctor_service = None
         self.repair_backend = None
@@ -33,6 +34,16 @@ class SettingsDialog(QDialog):
         self._current_proposal = None
         self._chat_busy = False
         self._repair_busy = False
+        self._model_controls = {}
+        self._model_memory = {
+            backend: {
+                role: dict(config.get_model_choice(backend, role))
+                for role in config.MODEL_ROLES
+            }
+            for backend in ("claude", "codex")
+        }
+        self._active_model_backend = None
+        self._loading_models = False
         self.setWindowTitle("QGent — Settings")
         self.setMinimumSize(720, 680)
         self._build()
@@ -83,21 +94,33 @@ class SettingsDialog(QDialog):
         self.cli_path.textChanged.connect(self._refresh_cli_status)
         outer.addWidget(gb)
 
-        gm = QGroupBox("Models")
-        mform = QFormLayout(gm)
-        self.model_sup = self._model_combo()
-        self.model_worker = self._model_combo()
-        self.model_light = self._model_combo()
-        mform.addRow("Supervisor / geoprocessor / cartographer", self.model_sup)
-        mform.addRow("Worker (override)", self.model_worker)
-        mform.addRow("Light (data-scout, qa-verifier)", self.model_light)
+        self.models_group = QGroupBox("Models — Claude Code")
+        mform = QFormLayout(self.models_group)
+        sup_row, self.model_sup, self.model_sup_custom = (
+            self._create_model_selector("supervisor"))
+        worker_row, self.model_worker, self.model_worker_custom = (
+            self._create_model_selector("worker"))
+        light_row, self.model_light, self.model_light_custom = (
+            self._create_model_selector("light"))
+        self.model_sup_label = QLabel("Supervisor / geoprocessor / cartographer")
+        self.model_worker_label = QLabel("Worker (override)")
+        self.model_light_label = QLabel("Light (data-scout, qa-verifier)")
+        mform.addRow(self.model_sup_label, sup_row)
+        mform.addRow(self.model_worker_label, worker_row)
+        mform.addRow(self.model_light_label, light_row)
+        self.codex_single_agent_note = QLabel(
+            "Codex runs single-agent — only the main model is used.")
+        self.codex_single_agent_note.setWordWrap(True)
+        self.codex_single_agent_note.setStyleSheet(
+            "color: palette(mid); font-size: 11px;")
+        mform.addRow(self.codex_single_agent_note)
         note = QLabel(
-            "Choose a model offered for the selected backend, or type a "
-            "custom model id. Existing custom values remain valid.")
+            "Each model appears once. Choose Custom… only when you need to "
+            "enter an unlisted raw CLI model id.")
         note.setWordWrap(True)
         note.setStyleSheet("color: palette(mid); font-size: 11px;")
         mform.addRow(note)
-        outer.addWidget(gm)
+        outer.addWidget(self.models_group)
         self.backend.currentIndexChanged.connect(self._update_backend_rows)
 
         gs = QGroupBox("Safety & execution")
@@ -249,16 +272,37 @@ class SettingsDialog(QDialog):
     # ==================================================================
     # General settings
     # ==================================================================
-    @staticmethod
-    def _model_combo():
+    def _create_model_selector(self, role):
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
         combo = QComboBox()
-        combo.setEditable(True)
-        combo.setInsertPolicy(QComboBox.NoInsert)
-        return combo
+        combo.setEditable(False)
+        custom = QLineEdit()
+        custom.setPlaceholderText("Raw model id")
+        custom.setVisible(False)
+        layout.addWidget(combo, 1)
+        layout.addWidget(custom, 1)
+        self._model_controls[role] = {
+            "row": row, "combo": combo, "custom": custom,
+        }
+        combo.currentIndexChanged.connect(
+            lambda _index, selected_role=role:
+            self._toggle_model_custom(selected_role))
+        return row, combo, custom
 
     def _update_backend_rows(self):
+        if self._loading_models:
+            return
+        backend = self.backend.currentData() or "claude"
+        if (self._active_model_backend
+                and self._active_model_backend != backend):
+            self._remember_visible_model_choices()
+        self._active_model_backend = backend
         self._update_cli_row()
-        self._populate_model_combos()
+        self._populate_model_combos(backend)
+        self._update_model_mode(backend)
 
     def _update_cli_row(self):
         is_codex = self.backend.currentData() == "codex"
@@ -271,14 +315,73 @@ class SettingsDialog(QDialog):
     def _refresh_cli_status(self):
         self.cli_status.setVisible(not bool(self.cli_path.text().strip()))
 
-    def _populate_model_combos(self):
-        models = config.model_ids(self.backend.currentData())
-        for combo in (self.model_sup, self.model_worker, self.model_light):
-            current = combo.currentText()
-            combo.clear()
-            combo.addItems(models)
-            if current:
-                combo.setCurrentText(current)
+    def _populate_model_combos(self, backend):
+        self._loading_models = True
+        try:
+            for role in config.MODEL_ROLES:
+                controls = self._model_controls[role]
+                combo = controls["combo"]
+                custom_edit = controls["custom"]
+                choice = self._model_memory[backend][role]
+                combo.blockSignals(True)
+                combo.clear()
+                for label, model_id in config.model_options(backend):
+                    combo.addItem(label, model_id)
+                combo.addItem("Custom…", config.CUSTOM_MODEL_SENTINEL)
+                normalized = config.normalize_model_id(
+                    backend, choice.get("model_id"))
+                is_custom = bool(choice.get("custom"))
+                if is_custom:
+                    index = combo.findData(config.CUSTOM_MODEL_SENTINEL)
+                    custom_edit.setText(choice.get("model_id") or "")
+                else:
+                    selected = normalized or config.default_model(backend, role)
+                    index = combo.findData(selected)
+                    custom_edit.clear()
+                combo.setCurrentIndex(max(0, index))
+                combo.blockSignals(False)
+                custom_edit.setVisible(is_custom)
+        finally:
+            self._loading_models = False
+
+    def _toggle_model_custom(self, role):
+        if self._loading_models:
+            return
+        controls = self._model_controls[role]
+        custom = controls["combo"].currentData() == config.CUSTOM_MODEL_SENTINEL
+        controls["custom"].setVisible(custom)
+        if custom:
+            controls["custom"].setFocus(Qt.OtherFocusReason)
+
+    def _remember_visible_model_choices(self):
+        backend = self._active_model_backend
+        if backend not in self._model_memory:
+            return
+        for role in config.MODEL_ROLES:
+            controls = self._model_controls[role]
+            value = controls["combo"].currentData()
+            custom = value == config.CUSTOM_MODEL_SENTINEL
+            if custom:
+                value = controls["custom"].text().strip()
+            self._model_memory[backend][role] = {
+                "model_id": str(value or config.default_model(backend, role)),
+                "custom": bool(custom and value),
+            }
+
+    def _update_model_mode(self, backend):
+        is_codex = backend == "codex"
+        caption = "Codex runs single-agent — only the main model is used."
+        self.models_group.setTitle(
+            "Models — Codex" if is_codex else "Models — Claude Code")
+        self.codex_single_agent_note.setVisible(is_codex)
+        for role, label in (
+                ("worker", self.model_worker_label),
+                ("light", self.model_light_label)):
+            row = self._model_controls[role]["row"]
+            row.setEnabled(not is_codex)
+            label.setEnabled(not is_codex)
+            row.setToolTip(caption if is_codex else "")
+            label.setToolTip(caption if is_codex else "")
 
     def _browse_cli(self):
         start = self.cli_path.text() or os.path.expanduser("~")
@@ -291,9 +394,6 @@ class SettingsDialog(QDialog):
         idx = self.backend.findData(config.get(config.K_BACKEND))
         self.backend.setCurrentIndex(max(0, idx))
         self._update_backend_rows()
-        self.model_sup.setCurrentText(config.get(config.K_MODEL_SUPERVISOR))
-        self.model_worker.setCurrentText(config.get(config.K_MODEL_WORKER))
-        self.model_light.setCurrentText(config.get(config.K_MODEL_LIGHT))
         pidx = self.perm.findData(config.get(config.K_PERMISSION_MODE))
         self.perm.setCurrentIndex(max(0, pidx))
         self.verifier.setChecked(config.get(config.K_VERIFIER))
@@ -308,20 +408,27 @@ class SettingsDialog(QDialog):
             self.tabs.setCurrentIndex(1)
             return
         backend_kind = self.backend.currentData()
+        self._remember_visible_model_choices()
         config.set(config.K_BACKEND, backend_kind)
         if backend_kind == "codex":
             config.set(config.K_CODEX_PATH, self.cli_path.text().strip())
         else:
             config.set(config.K_CLAUDE_PATH, self.cli_path.text().strip())
-        config.set(
-            config.K_MODEL_SUPERVISOR,
-            self.model_sup.currentText().strip() or "sonnet")
-        config.set(
-            config.K_MODEL_WORKER,
-            self.model_worker.currentText().strip() or "sonnet")
-        config.set(
-            config.K_MODEL_LIGHT,
-            self.model_light.currentText().strip() or "haiku")
+        for stored_backend in ("claude", "codex"):
+            for role in config.MODEL_ROLES:
+                choice = self._model_memory[stored_backend][role]
+                config.set_model_choice(
+                    stored_backend, role, choice["model_id"], choice["custom"])
+        # Keep legacy keys synchronized for older callers, but all Goal 6 code
+        # reads the per-backend keys above.
+        legacy_keys = {
+            "supervisor": config.K_MODEL_SUPERVISOR,
+            "worker": config.K_MODEL_WORKER,
+            "light": config.K_MODEL_LIGHT,
+        }
+        for role, legacy_key in legacy_keys.items():
+            config.set(
+                legacy_key, self._model_memory[backend_kind][role]["model_id"])
         config.set(config.K_PERMISSION_MODE, self.perm.currentData())
         config.set(config.K_VERIFIER, self.verifier.isChecked())
         config.set(config.K_EXEC_TIMEOUT, self.timeout.value())
