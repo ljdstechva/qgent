@@ -1,16 +1,18 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
   <defs>
-    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#2e8b57"/>
-      <stop offset="1" stop-color="#1f6feb"/>
+    <linearGradient id="qg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#12A594"/>
+      <stop offset="1" stop-color="#5B5BD6"/>
     </linearGradient>
   </defs>
-  <rect x="3" y="3" width="42" height="42" rx="9" fill="url(#g)"/>
-  <!-- stylised map fold -->
-  <path d="M12 15 L20 12 L28 15 L36 12 L36 33 L28 36 L20 33 L12 36 Z"
-        fill="none" stroke="#ffffff" stroke-width="2" stroke-linejoin="round"/>
-  <path d="M20 12 L20 33 M28 15 L28 36" stroke="#ffffff" stroke-width="1.4" opacity="0.8"/>
-  <!-- chat spark -->
-  <circle cx="33" cy="31" r="6.5" fill="#ffd23f"/>
-  <path d="M30 31 h6 M33 28 v6" stroke="#1f6feb" stroke-width="1.8" stroke-linecap="round"/>
+  <!-- hexagonal node -->
+  <path d="M24 3 L41.3 13 L41.3 33 L24 43 L6.7 33 L6.7 13 Z" fill="url(#qg)"/>
+  <!-- Q ring -->
+  <circle cx="24" cy="23" r="9.5" fill="none" stroke="#ffffff" stroke-width="3.2"/>
+  <!-- Q tail -->
+  <line x1="29.5" y1="28.5" x2="34.5" y2="33.5" stroke="#ffffff" stroke-width="3.2" stroke-linecap="round"/>
+  <!-- agent spark -->
+  <g transform="translate(33.5,12.5)">
+    <path d="M0 -4 L1.1 -1.1 L4 0 L1.1 1.1 L0 4 L-1.1 1.1 L-4 0 L-1.1 -1.1 Z" fill="#FFD23F"/>
+  </g>
 </svg>

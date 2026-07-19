@@ -119,7 +119,7 @@ def call_qgis(tool, args):
             line = buf.split(b"\n", 1)[0].decode("utf-8", "replace")
     except OSError as exc:
         return False, (f"Could not reach QGIS bridge at {HOST}:{PORT} ({exc}). "
-                       "Is the QGIS Copilot panel still open?")
+                       "Is the QGent panel still open?")
     if not line:
         return False, "Empty response from QGIS bridge."
     try:

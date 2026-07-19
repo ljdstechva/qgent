@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Persistent settings and CLI autodetection for QGIS Copilot.
+"""Persistent settings and CLI autodetection for QGent.
 
 All settings are stored under the ``QgisCopilot/`` group via ``QSettings`` so
 they survive QGIS restarts and are shared across projects. CLI paths are
@@ -24,6 +24,7 @@ K_MODEL_SUPERVISOR = "model_supervisor"
 K_MODEL_WORKER = "model_worker"
 K_MODEL_LIGHT = "model_light"          # data-scout / qa-verifier
 K_EXEC_TIMEOUT = "exec_timeout_s"
+K_REDUCE_MOTION = "reduce_motion"
 
 DEFAULTS = {
     K_BACKEND: "claude",
@@ -36,9 +37,10 @@ DEFAULTS = {
     K_MODEL_WORKER: "sonnet",
     K_MODEL_LIGHT: "haiku",
     K_EXEC_TIMEOUT: 60,
+    K_REDUCE_MOTION: False,
 }
 
-_BOOL_KEYS = {K_VERIFIER}
+_BOOL_KEYS = {K_VERIFIER, K_REDUCE_MOTION}
 _INT_KEYS = {K_MAX_RESULT, K_EXEC_TIMEOUT}
 
 

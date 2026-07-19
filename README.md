@@ -1,6 +1,6 @@
-# QGIS Copilot
+# QGent — A QGIS AI Agent
 
-A dockable **chat agent** inside QGIS. Describe a GIS task in plain language —
+A dockable **AI agent** inside QGIS. Describe a GIS task in plain language —
 *"load this DEM and delineate the watershed"*, *"make an A3 vicinity map in
 EPSG:32651"* — and an agent team plans and executes **PyQGIS / Processing**
 directly in your open project, streaming its reasoning back into the panel and
@@ -53,8 +53,8 @@ QGIS ── Chat Dock ──spawns──▶ claude / codex CLI  (Supervisor + su
      *(Single-agent fallback — no subagents; see below.)*
 2. **Install the plugin:** copy the `qgis_chat_agent/` folder into your QGIS
    plugins directory, or zip it and use *Plugins → Manage and Install → Install
-   from ZIP*. Enable **QGIS Copilot**.
-3. Click the **QGIS Copilot** toolbar button. Open **⚙ Settings** if the CLI
+   from ZIP*. Enable **QGent**.
+3. Click the **QGent** toolbar button. Open **⚙ Settings** if the CLI
    path wasn't autodetected.
 
 ## Usage
@@ -107,6 +107,16 @@ qgis_chat_agent/
 └── resources/     icon.svg
 ```
 
-> **Status: v0.1 (experimental).** Validate the CLI flags/stream schema against
-> your installed CLI versions (see *Phase 0* in the build plan) — the parser is
+## UI
+
+QGent v0.2 ships a redesigned, animated panel: teal→indigo accent theme that
+adapts to light/dark QGIS themes, right-aligned user bubbles + side-rail
+assistant messages, live tool-chip spinners with expandable details, shimmer
+subagent chips with elapsed time, a thinking indicator, a morphing Send⇄Stop
+button, smooth scrolling, and starter suggestion chips. Streamed tokens are
+coalesced (40 ms) so long answers render without stutter. All motion can be
+disabled via *Settings → Appearance → Reduce motion*.
+
+> **Status: v0.2 (experimental).** The Claude Code streaming seam was validated
+> against Claude Code 2.1.214 (`--include-partial-messages`); the parser is
 > tolerant of unknown event types, but flag names can change across releases.

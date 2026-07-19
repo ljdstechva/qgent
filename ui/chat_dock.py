@@ -1,11 +1,18 @@
 # -*- coding: utf-8 -*-
-"""The QGIS Copilot chat dock.
+"""The QGent chat dock.
 
 Owns, for the panel's lifetime:
   * the execution bridge (socket server + main-thread executor),
   * the generated MCP config the CLI reads,
   * the active agent backend and its per-turn signals,
   * message rendering (bubbles, tool chips, subagent chips, approval cards).
+
+UI notes: streamed tokens are coalesced on a 40 ms timer before rendering
+(markdown re-layout per delta is O(n^2) otherwise), and all entrance/state
+animations honour the "reduce motion" setting.
+
+The per-turn benchmark instrumentation (``_perf`` / ``_finish_perf``) is
+load-bearing for benchmark comparability — do not restructure it.
 """
 import csv
 import datetime
@@ -17,26 +24,36 @@ import time
 from qgis.PyQt.QtCore import Qt, QTimer
 from qgis.PyQt.QtWidgets import (
     QDockWidget, QWidget, QVBoxLayout, QHBoxLayout, QScrollArea, QLabel,
-    QPushButton, QToolButton, QMessageBox,
+    QToolButton, QFrame,
 )
 
 from .. import config
+from . import theme
+from .animations import fade_in, smooth_scroll_to_bottom, staggered, ThinkingDots
 from .widgets import (
     MessageBubble, ToolChip, SubagentChip, ApprovalCard, ChatInput,
+    SendStopButton, SuggestionChip,
 )
 from .settings_dialog import SettingsDialog
 from ..bridge.qgis_socket_server import BridgeServer
 from ..bridge.main_thread_executor import MainThreadExecutor
 from ..context.project_snapshot import build_context_block
 
+_SUGGESTIONS = [
+    "What CRS is this project?",
+    "Buffer the active layer by 100 m and add the result",
+    "Make an A3 vicinity map of the current canvas extent",
+]
+
 
 class ChatDock(QDockWidget):
     def __init__(self, iface, plugin_dir):
-        super().__init__("QGIS Copilot", iface.mainWindow())
+        super().__init__("QGent", iface.mainWindow())
         self.iface = iface
         self.plugin_dir = plugin_dir
         self.runtime_dir = os.path.join(plugin_dir, "claude_runtime")
         self.token = secrets.token_hex(16)
+        self.t = theme.Tokens()
 
         self.executor = None
         self.bridge = None
@@ -45,6 +62,14 @@ class ChatDock(QDockWidget):
         self._last_tool_chip = None
         self._subagent_chips = {}
         self._perf = None
+        self.hero = None
+
+        # token coalescing
+        self._stream_buf = ""
+        self._flush_timer = QTimer(self)
+        self._flush_timer.setSingleShot(True)
+        self._flush_timer.setInterval(40)
+        self._flush_timer.timeout.connect(self._flush_tokens)
 
         self._build_ui()
         self._start_bridge()
@@ -57,66 +82,113 @@ class ChatDock(QDockWidget):
     # ======================================================================
     def _build_ui(self):
         root = QWidget()
+        root.setObjectName("QgentRoot")
+        root.setStyleSheet(theme.build_qss(self.t))
         outer = QVBoxLayout(root)
-        outer.setContentsMargins(6, 6, 6, 6)
+        outer.setContentsMargins(8, 8, 8, 8)
+        outer.setSpacing(6)
 
-        # top bar
+        # -- header --------------------------------------------------------
         top = QHBoxLayout()
-        self.session_label = QLabel("New session")
-        self.session_label.setStyleSheet("color: palette(mid);")
-        top.addWidget(self.session_label)
+        top.setSpacing(8)
+        brand = QVBoxLayout()
+        brand.setSpacing(0)
+        wordmark = QLabel("QGent")
+        wordmark.setObjectName("QgentWordmark")
+        subtitle = QLabel("A QGIS AI Agent")
+        subtitle.setObjectName("QgentSubtitle")
+        brand.addWidget(wordmark)
+        brand.addWidget(subtitle)
+        top.addLayout(brand)
         top.addStretch(1)
+        self.session_label = QLabel("new session")
+        self.session_label.setObjectName("QgentSessionPill")
+        top.addWidget(self.session_label)
         self.new_btn = QToolButton()
-        self.new_btn.setText("＋ New")
+        self.new_btn.setObjectName("QgentIconBtn")
+        self.new_btn.setText("✚")
+        self.new_btn.setToolTip("New session")
+        self.new_btn.setCursor(Qt.PointingHandCursor)
         self.new_btn.clicked.connect(self.new_session)
         top.addWidget(self.new_btn)
         self.settings_btn = QToolButton()
+        self.settings_btn.setObjectName("QgentIconBtn")
         self.settings_btn.setText("⚙")
         self.settings_btn.setToolTip("Settings")
+        self.settings_btn.setCursor(Qt.PointingHandCursor)
         self.settings_btn.clicked.connect(self.open_settings)
         top.addWidget(self.settings_btn)
         outer.addLayout(top)
 
-        # message list
+        # -- message list --------------------------------------------------
         self.scroll = QScrollArea()
+        self.scroll.setObjectName("QgentScroll")
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QScrollArea.NoFrame)
         self.msg_container = QWidget()
+        self.msg_container.setObjectName("QgentMsgContainer")
         self.msg_layout = QVBoxLayout(self.msg_container)
         self.msg_layout.setContentsMargins(2, 2, 2, 2)
-        self.msg_layout.setSpacing(6)
+        self.msg_layout.setSpacing(8)
         self.msg_layout.addStretch(1)
         self.scroll.setWidget(self.msg_container)
+        # let the themed root background show through the scroll area
+        self.scroll.viewport().setAutoFillBackground(False)
+        self.msg_container.setAutoFillBackground(False)
         outer.addWidget(self.scroll, 1)
 
-        # status line
+        # -- activity strip ------------------------------------------------
+        activity = QWidget()
+        activity.setObjectName("QgentActivity")
+        arow = QHBoxLayout(activity)
+        arow.setContentsMargins(4, 0, 4, 0)
+        arow.setSpacing(6)
+        self.dots = ThinkingDots(self.t.accent)
+        self.dots.hide()
+        arow.addWidget(self.dots)
         self.status = QLabel("")
-        self.status.setStyleSheet("color: palette(mid); font-size: 11px;")
-        outer.addWidget(self.status)
+        arow.addWidget(self.status)
+        arow.addStretch(1)
+        outer.addWidget(activity)
 
-        # input row
+        # -- composer ------------------------------------------------------
+        composer = QFrame()
+        composer.setObjectName("QgentComposer")
+        crow = QHBoxLayout(composer)
+        crow.setContentsMargins(12, 4, 6, 4)
+        crow.setSpacing(6)
         self.input = ChatInput()
         self.input.send_requested.connect(self.on_send)
-        outer.addWidget(self.input)
-
-        row = QHBoxLayout()
-        row.addStretch(1)
-        self.stop_btn = QPushButton("Stop")
-        self.stop_btn.setEnabled(False)
-        self.stop_btn.clicked.connect(self.on_stop)
-        row.addWidget(self.stop_btn)
-        self.send_btn = QPushButton("Send")
-        self.send_btn.clicked.connect(self.on_send)
-        row.addWidget(self.send_btn)
-        outer.addLayout(row)
+        self.input.focus_changed.connect(
+            lambda on: self._set_composer_focus(composer, on))
+        crow.addWidget(self.input, 1)
+        self.action_btn = SendStopButton(self.t)
+        self.action_btn.clicked.connect(self._on_action_clicked)
+        crow.addWidget(self.action_btn, 0, Qt.AlignBottom)
+        outer.addWidget(composer)
 
         self.setWidget(root)
+
+    def _set_composer_focus(self, composer, on):
+        composer.setProperty("focused", "true" if on else "false")
+        theme.repolish(composer)
 
     def focus_input(self):
         self.input.setFocus()
 
+    # -- activity helpers ---------------------------------------------------
+    def _set_activity(self, text):
+        self.status.setText(text)
+
+    def _show_thinking(self):
+        self.dots.start()
+        self.status.setText("Thinking…")
+
+    def _hide_thinking(self):
+        self.dots.halt()
+
     # ======================================================================
-    # Bridge + backend
+    # Bridge + backend  (unchanged plumbing)
     # ======================================================================
     def _start_bridge(self):
         self.executor = MainThreadExecutor(self.iface, self)
@@ -209,6 +281,12 @@ class ChatDock(QDockWidget):
     # ======================================================================
     # Sending
     # ======================================================================
+    def _on_action_clicked(self):
+        if self.action_btn.is_busy_state():
+            self.on_stop()
+        else:
+            self.on_send()
+
     def on_send(self):
         text = self.input.toPlainText().strip()
         if not text:
@@ -216,7 +294,7 @@ class ChatDock(QDockWidget):
         if self.backend is None:
             return
         if self.backend.is_busy():
-            self.status.setText("Still working — press Stop to interrupt.")
+            self._set_activity("Still working — press Stop to interrupt.")
             return
         if not self.backend.cli_path:
             self._add_error(
@@ -237,6 +315,7 @@ class ChatDock(QDockWidget):
         self._add_user_message(text)
         self._current_bubble = None
         self._last_tool_chip = None
+        self._show_thinking()
 
         try:
             context_block = build_context_block(self.iface)
@@ -247,7 +326,9 @@ class ChatDock(QDockWidget):
     def on_stop(self):
         if self.backend is not None:
             self.backend.cancel()
-            self.status.setText("Stopped.")
+            self._end_stream()
+            self._hide_thinking()
+            self._set_activity("Stopped.")
             self._finish_perf()
 
     def new_session(self):
@@ -257,7 +338,7 @@ class ChatDock(QDockWidget):
         # Fresh session id; keep the same bridge (port/token still valid).
         self._build_backend()
         self._clear_messages()
-        self.session_label.setText("New session")
+        self.session_label.setText("new session")
         self._post_welcome()
 
     def open_settings(self):
@@ -266,42 +347,66 @@ class ChatDock(QDockWidget):
             # Backend or model choice may have changed — rebuild + rewrite config.
             self._write_mcp_config()
             self._build_backend()
-            self.status.setText("Settings applied.")
+            self._set_activity("Settings applied.")
+
+    # ======================================================================
+    # Streaming (coalesced)
+    # ======================================================================
+    def _on_token(self, text):
+        # TTFT is recorded at signal arrival, before coalescing, so the
+        # benchmark metric is unaffected by the 40 ms flush timer.
+        if self._perf is not None and self._perf["ttft_ms"] is None:
+            self._perf["ttft_ms"] = round((time.monotonic() - self._perf["start"]) * 1000)
+        self._hide_thinking()
+        if self._current_bubble is None:
+            self._current_bubble = MessageBubble("assistant", self.t)
+            self._add_widget(self._current_bubble)
+            self._current_bubble.set_streaming(True)
+        self._stream_buf += text
+        if not self._flush_timer.isActive():
+            self._flush_timer.start()
+
+    def _flush_tokens(self):
+        if self._stream_buf and self._current_bubble is not None:
+            self._current_bubble.append_text(self._stream_buf)
+            self._stream_buf = ""
+            smooth_scroll_to_bottom(self.scroll)
+
+    def _end_stream(self):
+        """Flush pending text and finish the streaming bubble."""
+        self._flush_timer.stop()
+        self._flush_tokens()
+        if self._current_bubble is not None:
+            self._current_bubble.set_streaming(False)
+        self._current_bubble = None
 
     # ======================================================================
     # Backend signal handlers
     # ======================================================================
-    def _on_token(self, text):
-        if self._perf is not None and self._perf["ttft_ms"] is None:
-            self._perf["ttft_ms"] = round((time.monotonic() - self._perf["start"]) * 1000)
-        if self._current_bubble is None:
-            self._current_bubble = MessageBubble("assistant")
-            self._add_widget(self._current_bubble)
-        self._current_bubble.append_text(text)
-        self._scroll_to_bottom()
-
     def _on_tool_call(self, name, args):
         if self._perf is not None:
             self._perf["tool_calls"] += 1
-        self._current_bubble = None
-        chip = ToolChip(name, args)
+        self._end_stream()
+        self._hide_thinking()
+        chip = ToolChip(name, args, self.t)
         self._last_tool_chip = chip
         self._add_widget(chip)
-        self.status.setText(f"Running {name.replace('mcp__qgis__', '')}…")
+        self._set_activity(f"Running {name.replace('mcp__qgis__', '')}…")
 
     def _on_tool_result(self, text):
         if self._last_tool_chip is not None:
             self._last_tool_chip.set_result(text)
 
     def _on_subagent_event(self, name, status):
-        self._current_bubble = None
+        self._end_stream()
         if status == "started":
             if self._perf is not None:
                 self._perf["delegations"] += 1
-            chip = SubagentChip(name)
+            self._hide_thinking()
+            chip = SubagentChip(name, self.t)
             self._subagent_chips[name] = chip
             self._add_widget(chip)
-            self.status.setText(f"🤖 {name} working…")
+            self._set_activity(f"{name} working…")
         elif status == "finished":
             chip = self._subagent_chips.get(name)
             if chip is not None:
@@ -309,18 +414,25 @@ class ChatDock(QDockWidget):
 
     def _on_session_started(self, session_id):
         short = session_id[:8]
-        backend = config.get(config.K_BACKEND).capitalize()
-        self.session_label.setText(f"{backend} · session {short}…")
+        backend = config.get(config.K_BACKEND)
+        self.session_label.setText(f"● {backend} · {short}")
 
     def _on_done(self, _result):
-        self._current_bubble = None
-        self.status.setText("Ready.")
+        self._end_stream()
+        self._hide_thinking()
+        if self._last_tool_chip is not None:
+            self._last_tool_chip.mark_done_without_result()
+        for chip in self._subagent_chips.values():
+            if chip._shimmer_pos is not None:  # never got its "finished" event
+                chip.set_finished()
+        self._set_activity("Ready.")
         self._finish_perf()
 
     def _on_error(self, message):
-        self._current_bubble = None
+        self._end_stream()
+        self._hide_thinking()
         self._add_error(message)
-        self.status.setText("Error.")
+        self._set_activity("Error.")
         self._finish_perf()
 
     def _finish_perf(self):
@@ -342,21 +454,22 @@ class ChatDock(QDockWidget):
             writer.writerow(row)
 
     def _on_busy_changed(self, busy):
-        self.send_btn.setEnabled(not busy)
-        self.stop_btn.setEnabled(busy)
+        self.action_btn.set_busy(busy)
         if busy:
-            self.status.setText("Thinking…")
+            self._show_thinking()
+        else:
+            self._hide_thinking()
 
     def _on_bridge_activity(self, tool):
         # Fires from the socket thread (queued); low-noise status hint.
-        self.status.setText(f"QGIS: {tool.replace('mcp__qgis__', '')}")
+        self._set_activity(f"QGIS: {tool.replace('mcp__qgis__', '')}")
 
     # ======================================================================
     # Approval gate
     # ======================================================================
     def on_approval_requested(self, ap):
-        self._current_bubble = None
-        card = ApprovalCard(ap.get("code", ""), ap.get("reasons", []))
+        self._end_stream()
+        card = ApprovalCard(ap.get("code", ""), ap.get("reasons", []), self.t)
 
         def decide(approved):
             ap["approved"] = approved
@@ -364,25 +477,29 @@ class ChatDock(QDockWidget):
 
         card.decided.connect(decide)
         self._add_widget(card)
-        self._scroll_to_bottom()
+        card.attention()
 
     # ======================================================================
     # Message list helpers
     # ======================================================================
     def _add_user_message(self, text):
-        bubble = MessageBubble("user")
+        bubble = MessageBubble("user", self.t)
         self._add_widget(bubble)
         bubble.set_text(text)
 
     def _add_error(self, text):
-        bubble = MessageBubble("assistant")
+        bubble = MessageBubble("assistant", self.t)
+        bubble.set_error()
         self._add_widget(bubble)
         bubble.set_text("**⚠ " + text + "**")
 
     def _add_widget(self, widget):
+        if self.hero is not None and self.hero.isVisible():
+            self.hero.hide()
         # Insert before the trailing stretch.
         self.msg_layout.insertWidget(self.msg_layout.count() - 1, widget)
-        self._scroll_to_bottom()
+        fade_in(widget)
+        smooth_scroll_to_bottom(self.scroll)
 
     def _clear_messages(self):
         while self.msg_layout.count() > 1:
@@ -390,29 +507,59 @@ class ChatDock(QDockWidget):
             w = item.widget()
             if w is not None:
                 w.deleteLater()
+        self.hero = None
         self._current_bubble = None
         self._last_tool_chip = None
         self._subagent_chips.clear()
+        self._stream_buf = ""
 
-    def _scroll_to_bottom(self):
-        QTimer.singleShot(0, lambda: self.scroll.verticalScrollBar().setValue(
-            self.scroll.verticalScrollBar().maximum()))
-
+    # ======================================================================
+    # Empty state
+    # ======================================================================
     def _post_welcome(self):
-        cli = config.active_cli_path()
-        backend = config.get(config.K_BACKEND).capitalize()
-        if cli:
-            msg = (f"**QGIS Copilot ready** ({backend}).\n\nDescribe a GIS task — "
-                   "e.g. *“buffer the active layer by 100 m and add the result”* "
-                   "or *“make an A3 vicinity map in EPSG:32651”*. I execute PyQGIS "
-                   "directly in this project and ask before anything destructive.")
-        else:
-            msg = ("**No agent CLI found.** Install the Claude Code CLI "
-                   "(`npm i -g @anthropic-ai/claude-code`) and log in with your "
-                   "Claude subscription, then open ⚙ Settings to set its path.")
-        bubble = MessageBubble("assistant")
-        self._add_widget(bubble)
-        bubble.set_text(msg)
+        self._show_hero()
+        if not config.active_cli_path():
+            self._add_error(
+                "No agent CLI found. Install the Claude Code CLI "
+                "(`npm i -g @anthropic-ai/claude-code`) and log in with your "
+                "Claude subscription, then open ⚙ Settings to set its path.")
+
+    def _show_hero(self):
+        hero = QWidget()
+        hero.setObjectName("QgentHero")
+        lay = QVBoxLayout(hero)
+        lay.setContentsMargins(10, 28, 10, 10)
+        lay.setSpacing(10)
+
+        greet = QLabel("Hi, I'm QGent 🌏")
+        greet.setObjectName("QgentGreeting")
+        greet.setAlignment(Qt.AlignCenter)
+        lay.addWidget(greet)
+        sub = QLabel("Describe a GIS task in plain language. I run PyQGIS\n"
+                     "directly in this project — and always ask before\n"
+                     "anything destructive.")
+        sub.setObjectName("QgentGreetingSub")
+        sub.setAlignment(Qt.AlignCenter)
+        lay.addWidget(sub)
+        lay.addSpacing(8)
+
+        chips = []
+        for text in _SUGGESTIONS:
+            chip = SuggestionChip(text)
+            chip.clicked.connect(lambda _=False, s=text: self._use_suggestion(s))
+            lay.addWidget(chip)
+            chips.append(chip)
+
+        self.hero = hero
+        self.msg_layout.insertWidget(0, hero)
+        staggered(chips)
+
+    def _use_suggestion(self, text):
+        self.input.setPlainText(text)
+        self.input.setFocus()
+        cursor = self.input.textCursor()
+        cursor.movePosition(cursor.End)
+        self.input.setTextCursor(cursor)
 
     # ======================================================================
     # Teardown

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Settings dialog for QGIS Copilot."""
+"""Settings dialog for QGent."""
 import os
 
 from qgis.PyQt.QtWidgets import (
@@ -14,7 +14,7 @@ from .. import config
 class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("QGIS Copilot — Settings")
+        self.setWindowTitle("QGent — Settings")
         self.setMinimumWidth(460)
         self._build()
         self._load()
@@ -83,6 +83,13 @@ class SettingsDialog(QDialog):
         sform.addRow("Max tool result size", self.max_result)
         outer.addWidget(gs)
 
+        # appearance group
+        ga = QGroupBox("Appearance")
+        aform = QFormLayout(ga)
+        self.reduce_motion = QCheckBox("Reduce motion (disable animations)")
+        aform.addRow("Motion", self.reduce_motion)
+        outer.addWidget(ga)
+
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self._save_and_accept)
         buttons.rejected.connect(self.reject)
@@ -119,6 +126,7 @@ class SettingsDialog(QDialog):
         self.verifier.setChecked(config.get(config.K_VERIFIER))
         self.timeout.setValue(config.get(config.K_EXEC_TIMEOUT))
         self.max_result.setValue(config.get(config.K_MAX_RESULT))
+        self.reduce_motion.setChecked(config.get(config.K_REDUCE_MOTION))
 
     def _save_and_accept(self):
         backend_kind = self.backend.currentData()
@@ -134,4 +142,5 @@ class SettingsDialog(QDialog):
         config.set(config.K_VERIFIER, self.verifier.isChecked())
         config.set(config.K_EXEC_TIMEOUT, self.timeout.value())
         config.set(config.K_MAX_RESULT, self.max_result.value())
+        config.set(config.K_REDUCE_MOTION, self.reduce_motion.isChecked())
         self.accept()

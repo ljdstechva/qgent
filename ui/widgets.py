@@ -1,173 +1,344 @@
 # -*- coding: utf-8 -*-
-"""Message-list widgets for the chat panel.
+"""QGent message-list widgets.
 
-All colour choices lean on the widget palette so the panel reads correctly in
-both light and dark QGIS themes. Nothing here talks to the agent — the dock
-wires signals to these widgets.
+Visual language (see theme.py):
+  * user messages   — right-aligned teal-tinted rounded bubbles (≤ ~85% width)
+  * assistant text  — full-width, accent side-rail, no box
+  * tool calls      — pill chips with a live spinner → ✓/✕, expandable details
+  * subagents       — shimmering chips with elapsed time
+  * approvals       — amber cards that slide in and pulse for attention
+
+Nothing here talks to the agent — the dock wires signals into these widgets.
 """
 import json
+import time
+from datetime import datetime
 
-from qgis.PyQt.QtCore import Qt, pyqtSignal
+from qgis.PyQt.QtCore import Qt, QTimer, pyqtSignal
+from qgis.PyQt.QtGui import QPainter, QColor, QPolygonF, QPen
+from qgis.PyQt.QtCore import QPointF
 from qgis.PyQt.QtWidgets import (
     QFrame, QLabel, QVBoxLayout, QHBoxLayout, QToolButton, QTextBrowser,
-    QPushButton, QPlainTextEdit, QWidget, QSizePolicy,
+    QPushButton, QPlainTextEdit, QWidget, QSizePolicy, QApplication,
 )
 
+from . import theme
+from .animations import (
+    fade_in, animate_height, Spinner, ShimmerMixin, motion_enabled,
+)
 
-class MessageBubble(QFrame):
-    """A user or assistant message. Assistant text is markdown-rendered."""
+_CARET = "▍"
 
-    def __init__(self, role, parent=None):
+
+def _now():
+    return datetime.now().strftime("%H:%M")
+
+
+# ===========================================================================
+# Messages
+# ===========================================================================
+class MessageBubble(QWidget):
+    """A user or assistant message.
+
+    The outer widget is a full-width row; the inner frame is the styled
+    bubble/rail. Assistant text renders markdown and supports a streaming
+    caret; heights are measured off the text document (scroll lives in the
+    outer QScrollArea only).
+    """
+
+    def __init__(self, role, tokens, parent=None):
         super().__init__(parent)
         self.role = role
+        self.t = tokens
         self._text = ""
-        self.setFrameShape(QFrame.StyledPanel)
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(10, 6, 10, 6)
+        self._streaming = False
+        self._caret_on = True
 
-        who = QLabel("You" if role == "user" else "Copilot")
-        f = who.font()
-        f.setBold(True)
-        f.setPointSizeF(max(7.0, f.pointSizeF() - 1))
-        who.setFont(f)
-        who.setStyleSheet("color: palette(mid);")
-        lay.addWidget(who)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(0)
+
+        self.frame = QFrame()
+        inner = QVBoxLayout(self.frame)
 
         self.body = QTextBrowser()
         self.body.setOpenExternalLinks(True)
         self.body.setFrameShape(QFrame.NoFrame)
-        self.body.setStyleSheet("background: transparent;")
         self.body.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.body.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        lay.addWidget(self.body)
+        self.body.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
-        tint = "rgba(120,150,255,0.10)" if role == "user" else "rgba(120,200,120,0.08)"
-        self.setStyleSheet(f"MessageBubble {{ border-radius: 8px; background: {tint}; }}")
+        self.stamp = QLabel(_now())
+        self.stamp.setObjectName("QgentTimestamp")
+
+        if role == "user":
+            self.frame.setObjectName("QgentUserBubble")
+            inner.setContentsMargins(12, 8, 12, 6)
+            row.addStretch(15)           # ≤ ~85% width, right-aligned
+            row.addWidget(self.frame, 85)
+            stamp_row = QHBoxLayout()
+            stamp_row.addStretch(1)
+            stamp_row.addWidget(self.stamp)
+        else:
+            self.frame.setObjectName("QgentAssistant")
+            inner.setContentsMargins(10, 2, 2, 2)
+            row.addWidget(self.frame, 1)
+            stamp_row = QHBoxLayout()
+            stamp_row.addWidget(self.stamp)
+            stamp_row.addStretch(1)
+        inner.addWidget(self.body)
+        inner.addLayout(stamp_row)
+
+        # Streaming caret blink (assistant only). Re-render is cheap between
+        # deltas because the doc is already laid out.
+        self._blink = QTimer(self)
+        self._blink.setInterval(500)
+        self._blink.timeout.connect(self._toggle_caret)
+
+    # -- content ------------------------------------------------------------
+    def set_error(self):
+        self.frame.setProperty("error", "true")
+        theme.repolish(self.frame)
+
+    def set_streaming(self, on):
+        if self.role != "assistant":
+            return
+        self._streaming = on
+        if on and motion_enabled():
+            self._blink.start()
+        else:
+            self._blink.stop()
+            self._caret_on = False
+        self._render()
 
     def set_text(self, text):
         self._text = text
-        if self.role == "assistant":
-            self.body.setMarkdown(text)
-        else:
-            self.body.setPlainText(text)
-        self._autosize()
+        self._render()
 
     def append_text(self, delta):
-        self.set_text(self._text + delta)
+        self._text += delta
+        self._render()
 
+    def text(self):
+        return self._text
+
+    def _toggle_caret(self):
+        self._caret_on = not self._caret_on
+        self._render()
+
+    def _render(self):
+        shown = self._text
+        if self._streaming and (self._caret_on or not motion_enabled()):
+            shown += _CARET
+        if self.role == "assistant":
+            self.body.setMarkdown(shown)
+        else:
+            self.body.setPlainText(shown)
+        self._autosize()
+
+    # -- sizing (fixes the clipped-welcome bug) -----------------------------
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._autosize()
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        # First layout pass may have measured at width 0 — re-measure async.
+        QTimer.singleShot(0, self._autosize)
+
     def _autosize(self):
-        # Grow the browser to fit its content so the outer scroll area owns
-        # scrolling, not each bubble. Guard against a not-yet-laid-out width of
-        # ~0, which would wrap every character and blow the height up.
         vw = self.body.viewport().width()
         if vw <= 10:
-            vw = max(self.width() - 24, 240)
-        self.body.document().setTextWidth(vw)
-        h = int(self.body.document().size().height()) + 8
-        self.body.setMinimumHeight(max(24, h))
-        self.body.setMaximumHeight(max(24, h))
+            vw = max(self.width() - 40, 220)
+        doc = self.body.document()
+        doc.setTextWidth(vw)
+        h = int(doc.size().height()) + 6
+        self.body.setFixedHeight(max(22, h))
 
 
+# ===========================================================================
+# Tool chip
+# ===========================================================================
 class ToolChip(QFrame):
-    """Collapsible chip for a single tool call + its (optional) result."""
+    """Pill for one tool call: spinner while running → ✓/✕, click to expand."""
 
-    def __init__(self, name, args, parent=None):
+    def __init__(self, name, args, tokens, parent=None):
         super().__init__(parent)
-        self.setFrameShape(QFrame.StyledPanel)
-        self.setStyleSheet(
-            "ToolChip { border-radius: 6px; background: rgba(128,128,128,0.10); }")
+        self.t = tokens
+        self.setObjectName("QgentToolChip")
+        self._expanded = False
+        self._raw = _short_json(args)
+        self._result_raw = ""
+
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(8, 4, 8, 4)
+        lay.setContentsMargins(10, 5, 10, 5)
+        lay.setSpacing(4)
 
-        pretty = _pretty_tool_name(name)
-        self.toggle = QToolButton()
-        self.toggle.setText(f"⚙ {pretty}")
-        self.toggle.setCheckable(True)
-        self.toggle.setStyleSheet("QToolButton { border: none; font-weight: bold; }")
-        self.toggle.setToolButtonStyle(Qt.ToolButtonTextOnly)
-        self.toggle.setArrowType(Qt.RightArrow)
-        self.toggle.toggled.connect(self._on_toggle)
-        lay.addWidget(self.toggle)
+        head = QHBoxLayout()
+        head.setSpacing(7)
+        self.spinner = Spinner(tokens.accent)
+        head.addWidget(self.spinner)
+        self.state_lbl = QLabel("")            # becomes ✓ / ✕
+        self.state_lbl.setObjectName("QgentChipState")
+        self.state_lbl.hide()
+        head.addWidget(self.state_lbl)
+        self.name_lbl = QLabel(_pretty_tool_name(name))
+        f = self.name_lbl.font()
+        f.setBold(True)
+        self.name_lbl.setFont(f)
+        head.addWidget(self.name_lbl)
+        head.addStretch(1)
+        self.chevron = QLabel("▸")
+        self.chevron.setStyleSheet(f"color: {tokens.text_muted}; background: transparent;")
+        head.addWidget(self.chevron)
+        lay.addLayout(head)
 
+        # details (collapsed by default, animated reveal)
+        self.details_wrap = QWidget()
+        dw = QVBoxLayout(self.details_wrap)
+        dw.setContentsMargins(0, 0, 0, 0)
+        dw.setSpacing(4)
         self.details = QTextBrowser()
-        self.details.setFrameShape(QFrame.NoFrame)
-        self.details.setVisible(False)
-        self.details.setMaximumHeight(220)
-        body = "**Arguments**\n```json\n" + _short_json(args) + "\n```"
-        self.details.setMarkdown(body)
-        self._args_md = body
-        lay.addWidget(self.details)
+        self.details.setMinimumHeight(60)
+        self.details.setMaximumHeight(200)
+        self.details.setMarkdown("**Arguments**\n```json\n" + self._raw + "\n```")
+        dw.addWidget(self.details)
+        copy_row = QHBoxLayout()
+        copy_row.addStretch(1)
+        self.copy_btn = QToolButton()
+        self.copy_btn.setObjectName("QgentCopyBtn")
+        self.copy_btn.setText("Copy")
+        self.copy_btn.setCursor(Qt.PointingHandCursor)
+        self.copy_btn.clicked.connect(self._copy)
+        copy_row.addWidget(self.copy_btn)
+        dw.addLayout(copy_row)
+        self.details_wrap.setMaximumHeight(0)
+        self.details_wrap.setVisible(False)
+        lay.addWidget(self.details_wrap)
 
+        self.setCursor(Qt.PointingHandCursor)
+
+    # -- results ------------------------------------------------------------
     def set_result(self, text):
-        self._args_md += "\n\n**Result**\n```\n" + _truncate(text, 1500) + "\n```"
-        self.details.setMarkdown(self._args_md)
+        self._result_raw = text
+        ok = not _looks_like_error(text)
+        self.spinner.stop()
+        self.spinner.hide()
+        color = self.t.ok if ok else self.t.danger
+        self.state_lbl.setText("✓" if ok else "✕")
+        self.state_lbl.setStyleSheet(
+            f"color: {color}; font-weight: 700; background: transparent;")
+        self.state_lbl.show()
+        fade_in(self.state_lbl, 150)
+        md = ("**Arguments**\n```json\n" + self._raw + "\n```\n\n"
+              "**Result**\n```\n" + _truncate(text, 1500) + "\n```")
+        self.details.setMarkdown(md)
 
-    def _on_toggle(self, checked):
-        self.toggle.setArrowType(Qt.DownArrow if checked else Qt.RightArrow)
-        self.details.setVisible(checked)
+    def mark_done_without_result(self):
+        """Turn finished but no explicit result routed here."""
+        if self.spinner.isVisible():
+            self.set_result("(no result captured)")
+
+    # -- expand/collapse ----------------------------------------------------
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._toggle()
+        super().mousePressEvent(event)
+
+    def _toggle(self):
+        self._expanded = not self._expanded
+        self.chevron.setText("▾" if self._expanded else "▸")
+        if self._expanded:
+            self.details_wrap.setVisible(True)
+            target = self.details_wrap.sizeHint().height()
+            animate_height(self.details_wrap, 0, min(target, 240))
+        else:
+            animate_height(self.details_wrap, self.details_wrap.height(), 0,
+                           on_done=lambda: self.details_wrap.setVisible(False))
+
+    def _copy(self):
+        QApplication.clipboard().setText(
+            "ARGS:\n" + self._raw + "\n\nRESULT:\n" + self._result_raw)
+        self.copy_btn.setText("Copied ✓")
+        QTimer.singleShot(1200, lambda: self.copy_btn.setText("Copy"))
 
 
-class SubagentChip(QFrame):
-    """Status chip for a delegated subagent."""
-
+# ===========================================================================
+# Subagent chip
+# ===========================================================================
+class SubagentChip(QFrame, ShimmerMixin):
     _ICONS = {"data-scout": "🔎", "geoprocessor": "🛠", "cartographer": "🗺",
               "qa-verifier": "✅"}
 
-    def __init__(self, name, parent=None):
+    def __init__(self, name, tokens, parent=None):
         super().__init__(parent)
+        self.t = tokens
         self.name = name
-        self.setFrameShape(QFrame.StyledPanel)
-        self.setStyleSheet(
-            "SubagentChip { border-radius: 6px; background: rgba(120,160,255,0.12); }")
+        self.setObjectName("QgentSubagentChip")
+        self._t0 = time.monotonic()
+
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(8, 4, 8, 4)
+        lay.setContentsMargins(10, 5, 10, 5)
+        lay.setSpacing(7)
         icon = self._ICONS.get(name, "🤖")
-        self.label = QLabel(f"{icon} <b>{name}</b> — working…")
+        self.label = QLabel(f"{icon}  <b>{name}</b> · working…")
         lay.addWidget(self.label)
         lay.addStretch(1)
 
+        self._init_shimmer(tokens.qcolor(tokens.accent))
+
     def set_finished(self):
+        self.stop_shimmer()
         icon = self._ICONS.get(self.name, "🤖")
-        self.label.setText(f"{icon} <b>{self.name}</b> — done")
+        elapsed = time.monotonic() - self._t0
+        self.label.setText(
+            f"{icon}  <b>{self.name}</b> · done "
+            f"<span style='color:{self.t.text_muted}'>· {elapsed:.0f}s</span>")
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        self._draw_shimmer()
 
 
+# ===========================================================================
+# Approval card
+# ===========================================================================
 class ApprovalCard(QFrame):
-    """Inline Approve/Deny gate for destructive execute_pyqgis code."""
-
     decided = pyqtSignal(bool)
 
-    def __init__(self, code, reasons, parent=None):
+    def __init__(self, code, reasons, tokens, parent=None):
         super().__init__(parent)
-        self.setFrameShape(QFrame.StyledPanel)
-        self.setStyleSheet(
-            "ApprovalCard { border-radius: 8px; border: 1px solid rgba(230,150,60,0.8);"
-            " background: rgba(230,150,60,0.10); }")
+        self.t = tokens
+        self.setObjectName("QgentApproval")
+
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(10, 8, 10, 8)
+        lay.setContentsMargins(12, 10, 12, 10)
+        lay.setSpacing(6)
 
         head = QLabel("⚠ <b>Approval required</b> — this code looks destructive:")
         head.setWordWrap(True)
         lay.addWidget(head)
 
-        reason_txt = "\n".join(f"• {r}" for r in reasons) or "• (permission mode: ask always)"
+        reason_txt = "\n".join(f"•  {r}" for r in reasons) \
+            or "•  (permission mode: ask always)"
         rlbl = QLabel(reason_txt)
         rlbl.setWordWrap(True)
-        rlbl.setStyleSheet("color: palette(mid);")
+        rlbl.setStyleSheet(f"color: {tokens.text_muted}; background: transparent;")
         lay.addWidget(rlbl)
 
         viewer = QTextBrowser()
         viewer.setMarkdown("```python\n" + _truncate(code, 4000) + "\n```")
-        viewer.setMaximumHeight(200)
+        viewer.setMaximumHeight(190)
         lay.addWidget(viewer)
 
         row = QHBoxLayout()
         row.addStretch(1)
         self.deny_btn = QPushButton("Deny")
+        self.deny_btn.setObjectName("QgentDeny")
+        self.deny_btn.setCursor(Qt.PointingHandCursor)
         self.approve_btn = QPushButton("Approve & run")
+        self.approve_btn.setObjectName("QgentApprove")
+        self.approve_btn.setCursor(Qt.PointingHandCursor)
         self.approve_btn.setDefault(True)
         row.addWidget(self.deny_btn)
         row.addWidget(self.approve_btn)
@@ -176,24 +347,41 @@ class ApprovalCard(QFrame):
         self.approve_btn.clicked.connect(lambda: self._decide(True))
         self.deny_btn.clicked.connect(lambda: self._decide(False))
 
+    def attention(self):
+        """Border pulse — call after the card is added and visible."""
+        from .animations import pulse_border
+        t = self.t
+
+        def qss(alpha):
+            c = QColor(t.warn)
+            rgba = f"rgba({c.red()},{c.green()},{c.blue()},{alpha:.2f})"
+            return (f"#QgentApproval {{ background: {t.warn_bg};"
+                    f" border: 1px solid {rgba}; border-left: 3px solid {rgba};"
+                    f" border-radius: 10px; }}")
+        pulse_border(self, qss, t.warn)
+
     def _decide(self, approved):
         self.approve_btn.setEnabled(False)
         self.deny_btn.setEnabled(False)
-        verdict = "✅ Approved" if approved else "🚫 Denied"
-        self.approve_btn.setText(verdict)
+        self.approve_btn.setText("✅ Approved" if approved else "🚫 Denied")
         self.decided.emit(approved)
 
 
+# ===========================================================================
+# Composer pieces
+# ===========================================================================
 class ChatInput(QPlainTextEdit):
-    """Multi-line input: Enter sends, Shift+Enter inserts a newline."""
+    """Auto-growing input: Enter sends, Shift+Enter inserts a newline."""
 
     send_requested = pyqtSignal()
+    focus_changed = pyqtSignal(bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setPlaceholderText("Describe the GIS task…  (Enter to send, Shift+Enter for newline)")
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
-        self.setMaximumHeight(120)
+        self.setPlaceholderText("Ask QGent anything about this project…")
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setFixedHeight(36)
+        self.textChanged.connect(self._grow)
 
     def keyPressEvent(self, event):
         if event.key() in (Qt.Key_Return, Qt.Key_Enter) and not (
@@ -202,10 +390,89 @@ class ChatInput(QPlainTextEdit):
             return
         super().keyPressEvent(event)
 
+    def focusInEvent(self, event):
+        super().focusInEvent(event)
+        self.focus_changed.emit(True)
 
-# --- helpers ---------------------------------------------------------------
+    def focusOutEvent(self, event):
+        super().focusOutEvent(event)
+        self.focus_changed.emit(False)
+
+    def _grow(self):
+        h = int(self.document().size().height()) + 14
+        self.setFixedHeight(max(36, min(h, 120)))
+
+
+class SendStopButton(QToolButton):
+    """Circular accent button that morphs between send (➤) and stop (■)."""
+
+    def __init__(self, tokens, parent=None):
+        super().__init__(parent)
+        self.t = tokens
+        self._busy = False
+        self._hover = False
+        self.setFixedSize(32, 32)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip("Send (Enter)")
+        self.setStyleSheet("QToolButton { border: none; background: transparent; }")
+
+    def set_busy(self, busy):
+        self._busy = busy
+        self.setToolTip("Stop" if busy else "Send (Enter)")
+        self.update()
+
+    def is_busy_state(self):
+        return self._busy
+
+    def enterEvent(self, e):
+        self._hover = True
+        self.update()
+        super().enterEvent(e)
+
+    def leaveEvent(self, e):
+        self._hover = False
+        self.update()
+        super().leaveEvent(e)
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        color = QColor(self.t.danger if self._busy else self.t.accent)
+        if self._hover:
+            color = color.lighter(112)
+        p.setPen(Qt.NoPen)
+        p.setBrush(color)
+        p.drawEllipse(self.rect().adjusted(1, 1, -1, -1))
+        p.setBrush(QColor("#FFFFFF"))
+        cx, cy = self.width() / 2, self.height() / 2
+        if self._busy:
+            p.drawRoundedRect(int(cx - 5), int(cy - 5), 10, 10, 2, 2)
+        else:
+            tri = QPolygonF([QPointF(cx - 4, cy - 6), QPointF(cx - 4, cy + 6),
+                             QPointF(cx + 7, cy)])
+            p.drawPolygon(tri)
+        p.end()
+
+
+class SuggestionChip(QPushButton):
+    """Clickable starter prompt shown in the empty state."""
+
+    def __init__(self, text, parent=None):
+        super().__init__(text, parent)
+        self.setObjectName("QgentSuggestion")
+        self.setCursor(Qt.PointingHandCursor)
+
+
+# ===========================================================================
+# helpers
+# ===========================================================================
 def _pretty_tool_name(name):
     return name.replace("mcp__qgis__", "").replace("mcp__", "")
+
+
+def _looks_like_error(text):
+    head = (text or "").lstrip()[:40].upper()
+    return head.startswith(("ERROR", "DENIED", "TIMEOUT", "COULD NOT REACH"))
 
 
 def _short_json(obj):

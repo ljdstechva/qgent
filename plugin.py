@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""QGIS Copilot plugin — QGIS integration layer.
+"""QGent plugin — QGIS integration layer.
 
 Responsibilities kept deliberately thin:
   * register a toolbar/menu action,
@@ -25,13 +25,13 @@ class QgisCopilotPlugin:
         self.iface = iface
         self.action = None
         self.dock = None
-        self.menu = "&QGIS Copilot"
+        self.menu = "&QGent"
 
     # -- QGIS hooks ---------------------------------------------------------
     def initGui(self):  # noqa: N802
         icon_path = os.path.join(PLUGIN_DIR, "resources", "icon.svg")
         icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
-        self.action = QAction(icon, "QGIS Copilot", self.iface.mainWindow())
+        self.action = QAction(icon, "QGent", self.iface.mainWindow())
         self.action.setCheckable(True)
         self.action.triggered.connect(self.toggle_panel)
 
