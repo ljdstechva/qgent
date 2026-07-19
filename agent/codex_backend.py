@@ -34,6 +34,7 @@ class CodexBackend(AgentBackend):
             return
         self.parser.reset()
         self._got_result = False
+        self.last_stderr = ""
 
         if self.session_id:
             args = ["exec", "resume", self.session_id, "--json"]
@@ -50,7 +51,8 @@ class CodexBackend(AgentBackend):
         self.proc.start(self.cli_path, args)
         if not self.proc.waitForStarted(5000):
             self.busy_changed.emit(False)
-            self.error.emit(f"Could not start Codex CLI at {self.cli_path!r}.")
+            self.last_stderr = f"Could not start Codex CLI at {self.cli_path!r}."
+            self.error.emit(self.last_stderr)
             self.proc = None
             return
 
@@ -106,6 +108,7 @@ class CodexBackend(AgentBackend):
         stderr = ""
         if self.proc is not None:
             stderr = bytes(self.proc.readAllStandardError()).decode("utf-8", "replace")
+        self.last_stderr = stderr
         if not self._got_result:
             if exit_code != 0:
                 self.error.emit(stderr.strip() or f"Codex CLI exited with code {exit_code}.")

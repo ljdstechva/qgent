@@ -7,11 +7,14 @@ Responsibilities kept deliberately thin:
   * own the lifetime of the execution bridge (socket server + main-thread
     executor) so it starts/stops with the plugin, not with each chat turn.
 """
+from collections import deque
+from datetime import datetime
 import os
 
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction
+from qgis.core import QgsApplication
 
 from .ui.chat_dock import ChatDock
 
@@ -26,9 +29,13 @@ class QgisCopilotPlugin:
         self.action = None
         self.dock = None
         self.menu = "&QGent"
+        self.diagnostic_logs = deque(maxlen=200)
+        self._message_log = None
 
     # -- QGIS hooks ---------------------------------------------------------
     def initGui(self):  # noqa: N802
+        self._message_log = QgsApplication.messageLog()
+        self._message_log.messageReceived.connect(self._capture_plugin_log)
         icon_path = os.path.join(PLUGIN_DIR, "resources", "icon.svg")
         icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
         self.action = QAction(icon, "QGent", self.iface.mainWindow())
@@ -39,6 +46,13 @@ class QgisCopilotPlugin:
         self.iface.addPluginToMenu(self.menu, self.action)
 
     def unload(self):
+        if self._message_log is not None:
+            try:
+                self._message_log.messageReceived.disconnect(
+                    self._capture_plugin_log)
+            except (RuntimeError, TypeError):
+                pass
+            self._message_log = None
         if self.dock is not None:
             self.dock.shutdown()
             self.iface.removeDockWidget(self.dock)
@@ -52,7 +66,9 @@ class QgisCopilotPlugin:
     # -- behaviour ----------------------------------------------------------
     def toggle_panel(self, checked):
         if self.dock is None:
-            self.dock = ChatDock(self.iface, PLUGIN_DIR)
+            self.dock = ChatDock(
+                self.iface, PLUGIN_DIR,
+                diagnostic_logs=self.diagnostic_logs)
             self.dock.visibilityChanged.connect(self._sync_action_state)
             self.iface.addDockWidget(Qt.RightDockWidgetArea, self.dock)
         self.dock.setVisible(checked)
@@ -65,3 +81,18 @@ class QgisCopilotPlugin:
             self.action.blockSignals(True)
             self.action.setChecked(visible)
             self.action.blockSignals(False)
+
+    def _capture_plugin_log(self, message, tag, level):
+        haystack = f"{tag} {message}".lower()
+        if "qgent" not in haystack and "qgis copilot" not in haystack:
+            return
+        try:
+            numeric_level = int(level)
+        except (TypeError, ValueError):
+            numeric_level = str(level)
+        self.diagnostic_logs.append({
+            "t": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "tag": str(tag),
+            "level": numeric_level,
+            "message": str(message),
+        })

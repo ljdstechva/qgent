@@ -52,11 +52,13 @@ _SUGGESTIONS = [
 
 
 class ChatDock(QDockWidget):
-    def __init__(self, iface, plugin_dir):
+    def __init__(self, iface, plugin_dir, diagnostic_logs=None):
         super().__init__("QGent", iface.mainWindow())
         self.iface = iface
         self.plugin_dir = plugin_dir
         self.runtime_dir = os.path.join(plugin_dir, "claude_runtime")
+        self.diagnostic_logs = (diagnostic_logs if diagnostic_logs is not None
+                                else [])
         self.token = secrets.token_hex(16)
         self.t = theme.Tokens()
 
@@ -489,7 +491,7 @@ class ChatDock(QDockWidget):
     def _mcp_config_path(self):
         return os.path.join(self.runtime_dir, "mcp-config.json")
 
-    def _write_mcp_config(self):
+    def _write_mcp_config(self, include_codex=None):
         py = config.python_executable()
         bridge_script = os.path.join(self.plugin_dir, "bridge", "mcp_stdio_bridge.py")
         conf = {
@@ -505,7 +507,9 @@ class ChatDock(QDockWidget):
         with open(self._mcp_config_path(), "w", encoding="utf-8") as fh:
             json.dump(conf, fh, indent=2)
         # Codex reads MCP servers from ~/.codex/config.toml.
-        if config.get(config.K_BACKEND) == "codex":
+        if (include_codex is True
+                or (include_codex is None
+                    and config.get(config.K_BACKEND) == "codex")):
             self._write_codex_toml(py, bridge_script)
 
     def _write_codex_toml(self, py, bridge_script):
@@ -526,6 +530,77 @@ class ChatDock(QDockWidget):
             existing = _strip_toml_block(existing, "[mcp_servers.qgis]")
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(existing.rstrip() + "\n" + block)
+
+    def _regenerate_doctor_configs(self):
+        self._write_mcp_config(include_codex=True)
+
+    def _restart_bridge_for_doctor(self):
+        old_bridge = self.bridge
+        old_executor = self.executor
+        if old_bridge is not None:
+            old_bridge.stop()
+            try:
+                old_bridge.deleteLater()
+            except (AttributeError, RuntimeError):
+                pass
+        if old_executor is not None:
+            try:
+                old_executor.deleteLater()
+            except (AttributeError, RuntimeError):
+                pass
+        self.bridge = None
+        self.executor = None
+        self.token = secrets.token_hex(16)
+        self._start_bridge()
+
+    def _repair_history_for_doctor(self):
+        if self.history_store is None:
+            return
+        self._history_state = self.history_store.load()
+
+    def _clear_session_for_doctor(self):
+        if self.backend is not None:
+            self.backend.session_id = None
+        self._history_update_session()
+        self.session_label.setText("new session")
+
+    def _doctor_context(self):
+        from ..doctor import DEFAULT_SOURCE_REPO
+
+        return {
+            "plugin_dir": self.plugin_dir,
+            "profile_dir": QgsApplication.qgisSettingsDirPath(),
+            "mcp_config_path": self._mcp_config_path(),
+            "codex_config_path": os.path.join(
+                os.path.expanduser("~"), ".codex", "config.toml"),
+            "python_executable": config.python_executable,
+            "bridge_env": self._bridge_env,
+            "log_entries": lambda: list(self.diagnostic_logs),
+            "last_cli_stderr": lambda: getattr(
+                self.backend, "last_stderr", "") if self.backend else "",
+            "session_id": lambda: getattr(
+                self.backend, "session_id", None) if self.backend else None,
+            "history_path": lambda: str(self.history_store.path)
+            if self.history_store is not None else "",
+            "project_filename": lambda: QgsProject.instance().fileName(),
+            "source_repo": str(DEFAULT_SOURCE_REPO),
+            "restart_bridge": self._restart_bridge_for_doctor,
+            "regenerate_configs": self._regenerate_doctor_configs,
+            "repair_history": self._repair_history_for_doctor,
+            "clear_session": self._clear_session_for_doctor,
+            "chat_busy": lambda: bool(
+                self.backend is not None and self.backend.is_busy()),
+            "reload_plugin": self._reload_plugin_for_doctor,
+        }
+
+    def _reload_plugin_for_doctor(self):
+        plugin_id = os.path.basename(os.path.normpath(self.plugin_dir))
+
+        def reload_now():
+            from qgis.utils import reloadPlugin
+            reloadPlugin(plugin_id)
+
+        QTimer.singleShot(0, reload_now)
 
     def _build_backend(self, preserve_session=True):
         previous_kind = self._backend_kind
@@ -663,8 +738,21 @@ class ChatDock(QDockWidget):
         self._post_welcome()
 
     def open_settings(self):
-        dlg = SettingsDialog(self)
-        if dlg.exec_():
+        dlg = SettingsDialog(self, doctor_context=self._doctor_context())
+        busy_signal = self.backend.busy_changed if self.backend is not None else None
+        if busy_signal is not None:
+            busy_signal.connect(dlg.set_chat_busy)
+        dlg.set_chat_busy(bool(self.backend is not None and self.backend.is_busy()))
+        try:
+            accepted = dlg.exec_()
+        finally:
+            if busy_signal is not None:
+                try:
+                    busy_signal.disconnect(dlg.set_chat_busy)
+                except (RuntimeError, TypeError):
+                    pass
+            dlg.shutdown()
+        if accepted:
             # Backend or model choice may have changed — rebuild + rewrite config.
             self._write_mcp_config()
             self._build_backend()

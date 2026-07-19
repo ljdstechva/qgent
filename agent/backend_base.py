@@ -33,6 +33,7 @@ class AgentBackend(QObject):
         self.mcp_config_path = mcp_config_path
         self.env = env
         self.session_id = None
+        self.last_stderr = ""
 
     # -- interface ----------------------------------------------------------
     def send(self, user_message, context_block):

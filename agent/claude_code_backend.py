@@ -53,6 +53,7 @@ class ClaudeCodeBackend(AgentBackend):
         self._final = None
         self._saw_text_delta = False
         self._pending_subagents.clear()
+        self.last_stderr = ""
 
         args = ["-p", "--output-format", "stream-json", "--verbose",
                 "--include-partial-messages",
@@ -77,7 +78,8 @@ class ClaudeCodeBackend(AgentBackend):
         self.proc.start(self.cli_path, args)
         if not self.proc.waitForStarted(5000):
             self.busy_changed.emit(False)
-            self.error.emit(f"Could not start Claude CLI at {self.cli_path!r}.")
+            self.last_stderr = f"Could not start Claude CLI at {self.cli_path!r}."
+            self.error.emit(self.last_stderr)
             self.proc = None
             return
 
@@ -164,6 +166,7 @@ class ClaudeCodeBackend(AgentBackend):
         stderr = ""
         if self.proc is not None:
             stderr = bytes(self.proc.readAllStandardError()).decode("utf-8", "replace")
+        self.last_stderr = stderr
         if self._final is not None:
             if self._final.get("is_error"):
                 self.error.emit(self._final.get("result") or "Agent reported an error.")
@@ -178,7 +181,8 @@ class ClaudeCodeBackend(AgentBackend):
     def _on_proc_error(self, err):
         if err == QProcess.FailedToStart:
             self.busy_changed.emit(False)
-            self.error.emit(f"Claude CLI failed to start at {self.cli_path!r}.")
+            self.last_stderr = f"Claude CLI failed to start at {self.cli_path!r}."
+            self.error.emit(self.last_stderr)
 
 
 def _flatten_result_content(content):

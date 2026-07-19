@@ -79,6 +79,39 @@ SHA-256 key derived from the project filename and unsaved projects use
 `unsaved.jsonl`. The **✚ New** button is the only normal action that deletes
 the current project's active history and resets its CLI session.
 
+### Doctor and repair backups
+
+Open **Settings → Doctor** to run non-AI health checks for both CLIs, Python,
+the live MCP bridge, Claude JSONL streaming, bundled agents/skills, history,
+byte-compilation, and the plugin's recent QGIS log ring. **Auto-repair failed
+checks** applies only the listed deterministic remedies (configuration/bridge,
+CLI-path, cache, corrupt-history, and stale-session repairs) and then reruns the
+full check set.
+
+**Diagnose & propose fix** copies the installed plugin to a disposable TEMP
+directory, excluding `claude_runtime/mcp-config.json`, and runs the selected
+repair model there. The real installed and source trees are byte/metadata/Git-
+state guarded while the proposal runs and revalidated when **Approve** is
+clicked, so a stale reviewed diff is refused. QGent presents the model
+explanation and unified diff; only an explicit **Approve** copies reviewed files
+to both trees and creates a `doctor:` source commit. Apply and Restore run in
+workers so the dialog event loop remains responsive. The configured source
+checkout is
+`D:\11 QGIS Agent\qgis_chat_agent` when that directory is present. **Deny**
+removes the copy without changing either tree. Codex repair uses
+`workspace-write`, an explicit disposable working root, the Windows elevated
+restricted-token sandbox, and disabled `unified_exec`; adversarial canaries
+verify that the copy remains writable while installed, source, profile, and
+unrelated sibling paths cannot be read or written. It never uses
+`danger-full-access`.
+
+Approved changes are backed up under
+`<QGIS settings dir>/qgent/backups/<timestamp>/`. Each backup contains a paired
+installed/source pre-state manifest with SHA-256 hashes. **Restore selected
+backup** verifies the restored bytes, creates a `doctor: restore` source commit
+when the source checkout is present, and enables plugin reload. Applying or
+restoring source changes requires Git on the machine.
+
 ## Safety
 
 - Every `execute_pyqgis` payload is AST-scanned for destructive patterns
@@ -102,9 +135,10 @@ is best-effort. **Claude Code is the reference backend.**
 
 ```
 qgis_chat_agent/
-├── metadata.txt, __init__.py, plugin.py, config.py, history.py
+├── metadata.txt, __init__.py, plugin.py, config.py, history.py, doctor.py
 ├── ui/            chat_dock.py, widgets.py, settings_dialog.py
-├── agent/         backend_base.py, claude_code_backend.py, codex_backend.py, stream_parser.py
+├── agent/         backend_base.py, claude_code_backend.py, codex_backend.py,
+│                  repair_backend.py, stream_parser.py
 ├── bridge/        qgis_socket_server.py, main_thread_executor.py, safety.py, mcp_stdio_bridge.py
 ├── context/       project_snapshot.py
 ├── claude_runtime/          # CLI working directory (bundled)

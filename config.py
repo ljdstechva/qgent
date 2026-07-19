@@ -106,6 +106,13 @@ def _which(*names):
     return ""
 
 
+def _first_existing(*paths):
+    for path in paths:
+        if path and os.path.isfile(path):
+            return os.path.abspath(path)
+    return ""
+
+
 def detect_claude():
     """Best-effort path to the Claude Code CLI.
 
@@ -115,7 +122,13 @@ def detect_claude():
     cached = get(K_CLAUDE_PATH)
     if cached and os.path.exists(cached):
         return cached
-    found = _which("claude", "claude.cmd", "claude.exe")
+    user_profile = os.environ.get("USERPROFILE", "")
+    app_data = os.environ.get("APPDATA", "")
+    found = _which("claude", "claude.cmd", "claude.exe") or _first_existing(
+        os.path.join(user_profile, ".local", "bin", "claude.exe"),
+        os.path.join(app_data, "npm", "claude.cmd"),
+        os.path.join(app_data, "npm", "claude.exe"),
+    )
     if found:
         set(K_CLAUDE_PATH, found)
     return found
@@ -125,7 +138,13 @@ def detect_codex():
     cached = get(K_CODEX_PATH)
     if cached and os.path.exists(cached):
         return cached
-    found = _which("codex", "codex.cmd", "codex.exe")
+    app_data = os.environ.get("APPDATA", "")
+    local_app_data = os.environ.get("LOCALAPPDATA", "")
+    found = _which("codex", "codex.cmd", "codex.exe") or _first_existing(
+        os.path.join(app_data, "npm", "codex.cmd"),
+        os.path.join(app_data, "npm", "codex.exe"),
+        os.path.join(local_app_data, "Programs", "codex", "codex.exe"),
+    )
     if found:
         set(K_CODEX_PATH, found)
     return found
