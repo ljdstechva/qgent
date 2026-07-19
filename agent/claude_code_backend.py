@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """Claude Code CLI backend (primary).
 
-One ``QProcess`` per turn:  ``claude -p --output-format stream-json --verbose``
+One ``QProcess`` per turn: ``claude -p --output-format stream-json --verbose
+--include-partial-messages``
 reading the prompt from stdin. The first turn captures ``session_id`` from the
 init event; later turns pass ``--resume <session_id>`` so skills, CLAUDE.md, and
 project grounding persist without a fragile long-lived stdin pipe.
@@ -36,6 +37,7 @@ class ClaudeCodeBackend(AgentBackend):
         self.proc = None
         self.parser = StreamJsonParser()
         self._final = None
+        self._saw_text_delta = False
         # tool_use id -> subagent name, so we can emit "finished" on its result
         self._pending_subagents = {}
 
@@ -49,9 +51,11 @@ class ClaudeCodeBackend(AgentBackend):
             return
         self.parser.reset()
         self._final = None
+        self._saw_text_delta = False
         self._pending_subagents.clear()
 
         args = ["-p", "--output-format", "stream-json", "--verbose",
+                "--include-partial-messages",
                 "--model", config.get(config.K_MODEL_SUPERVISOR),
                 "--mcp-config", self.mcp_config_path,
                 "--allowedTools", _ALLOWED_TOOLS,
@@ -104,9 +108,21 @@ class ClaudeCodeBackend(AgentBackend):
             if not self.session_id:
                 self.session_id = evt["session_id"]
                 self.session_started.emit(self.session_id)
+        elif etype == "stream_event":
+            inner = evt.get("event") or {}
+            delta = inner.get("delta") or {}
+            if (inner.get("type") == "content_block_delta"
+                    and delta.get("type") == "text_delta"):
+                text = delta.get("text", "")
+                if text:
+                    self._saw_text_delta = True
+                    self.token.emit(text)
         elif etype == "assistant":
             for block in evt.get("message", {}).get("content", []):
+                if block.get("type") == "text" and self._saw_text_delta:
+                    continue
                 self._handle_content_block(block)
+            self._saw_text_delta = False
         elif etype == "user":
             # tool_result blocks coming back into the main agent
             for block in evt.get("message", {}).get("content", []):
@@ -122,7 +138,7 @@ class ClaudeCodeBackend(AgentBackend):
         elif btype == "tool_use":
             name = block.get("name", "")
             tool_input = block.get("input", {})
-            if name == "Task":
+            if name in ("Task", "Agent"):
                 sub = tool_input.get("subagent_type") or "subagent"
                 self._pending_subagents[block.get("id")] = sub
                 self.subagent_event.emit(sub, "started")
