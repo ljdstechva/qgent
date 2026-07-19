@@ -26,18 +26,19 @@ from qgis.PyQt.QtWidgets import (
     QDockWidget, QWidget, QVBoxLayout, QHBoxLayout, QScrollArea, QLabel,
     QToolButton, QFrame,
 )
+from qgis.core import QgsLayerTreeGroup, QgsLayerTreeLayer
 
 from .. import config
 from . import theme
 from .animations import fade_in, smooth_scroll_to_bottom, staggered, ThinkingDots
 from .widgets import (
     MessageBubble, ToolChip, SubagentChip, ApprovalCard, ChatInput,
-    SendStopButton, SuggestionChip,
+    SendStopButton, SuggestionChip, ContextStrip,
 )
 from .settings_dialog import SettingsDialog
 from ..bridge.qgis_socket_server import BridgeServer
 from ..bridge.main_thread_executor import MainThreadExecutor
-from ..context.project_snapshot import build_context_block
+from ..context.project_snapshot import build_context_block, snapshot_layer
 
 _SUGGESTIONS = [
     "What CRS is this project?",
@@ -63,6 +64,8 @@ class ChatDock(QDockWidget):
         self._subagent_chips = {}
         self._perf = None
         self.hero = None
+        self._layer_tree_view = None
+        self._layer_selection_model = None
 
         # token coalescing
         self._stream_buf = ""
@@ -72,6 +75,7 @@ class ChatDock(QDockWidget):
         self._flush_timer.timeout.connect(self._flush_tokens)
 
         self._build_ui()
+        self._connect_layer_selection()
         self._start_bridge()
         self._write_mcp_config()
         self._build_backend()
@@ -151,6 +155,10 @@ class ChatDock(QDockWidget):
         arow.addStretch(1)
         outer.addWidget(activity)
 
+        # -- selected-layer context ---------------------------------------
+        self.context_strip = ContextStrip()
+        outer.addWidget(self.context_strip)
+
         # -- composer ------------------------------------------------------
         composer = QFrame()
         composer.setObjectName("QgentComposer")
@@ -175,6 +183,100 @@ class ChatDock(QDockWidget):
 
     def focus_input(self):
         self.input.setFocus()
+
+    # -- selected-layer context --------------------------------------------
+    def _connect_layer_selection(self):
+        """Keep the live strip synchronized with the Layers panel."""
+        try:
+            view = self.iface.layerTreeView()
+            selection_model = view.selectionModel()
+            if selection_model is None:
+                return
+            selection_model.selectionChanged.connect(
+                self._on_layer_selection_changed)
+            self._layer_tree_view = view
+            self._layer_selection_model = selection_model
+            self._update_layer_context_strip()
+        except (AttributeError, RuntimeError, TypeError):
+            self.context_strip.set_items([])
+
+    def _on_layer_selection_changed(self, *_args):
+        self._update_layer_context_strip()
+
+    def _selection_chip_items(self):
+        view = self._layer_tree_view
+        if view is None:
+            return []
+        try:
+            nodes = list(view.selectedNodes(False))
+        except (AttributeError, RuntimeError, TypeError):
+            return []
+
+        items = []
+        for node in nodes:
+            try:
+                if isinstance(node, QgsLayerTreeGroup):
+                    count = 0
+                    for child in node.findLayers():
+                        try:
+                            if child is not None and child.layer() is not None:
+                                count += 1
+                        except (AttributeError, RuntimeError, TypeError):
+                            continue
+                    items.append({
+                        "kind": "group",
+                        "name": str(node.name()),
+                        "layer_count": count,
+                    })
+                elif isinstance(node, QgsLayerTreeLayer):
+                    layer = node.layer()
+                    if layer is None:
+                        continue
+                    items.append({"kind": "layer", "name": str(layer.name())})
+            except (AttributeError, RuntimeError, TypeError):
+                continue
+        return items
+
+    def _selected_layer_snapshots(self):
+        view = self._layer_tree_view
+        if view is None:
+            return []
+        try:
+            layers = list(view.selectedLayersRecursive())
+        except (AttributeError, RuntimeError, TypeError):
+            try:
+                layers = list(view.selectedLayers())
+            except (AttributeError, RuntimeError, TypeError):
+                return []
+
+        snapshots = []
+        seen = set()
+        for layer in layers:
+            item = snapshot_layer(layer)
+            if item is None or item["id"] in seen:
+                continue
+            seen.add(item["id"])
+            snapshots.append(item)
+        return snapshots
+
+    def _capture_layer_selection(self):
+        """Freeze one send-time snapshot shared by tags and grounding."""
+        chips = self._selection_chip_items()
+        tags = []
+        for item in chips:
+            if item.get("kind") == "group":
+                tags.append(
+                    f"{item['name']} ({int(item.get('layer_count') or 0)} layers)")
+            else:
+                tags.append(item["name"])
+        return {
+            "chips": tuple(dict(item) for item in chips),
+            "tags": tuple(tags),
+            "layers": tuple(dict(item) for item in self._selected_layer_snapshots()),
+        }
+
+    def _update_layer_context_strip(self):
+        self.context_strip.set_items(self._selection_chip_items())
 
     # -- activity helpers ---------------------------------------------------
     def _set_activity(self, text):
@@ -303,6 +405,7 @@ class ChatDock(QDockWidget):
                 "path in ⚙ Settings.")
             return
 
+        selection = self._capture_layer_selection()
         marker = text.split(maxsplit=1)[0].upper()
         task_id = marker[1:-1] if marker in (
             "[T1]", "[T2]", "[T3]", "[T4]", "[T5]", "[T6]", "[SMOKE]") else "adhoc"
@@ -312,13 +415,14 @@ class ChatDock(QDockWidget):
                       "backend": backend,
                       "model": config.get(config.K_MODEL_SUPERVISOR) if backend == "claude" else ""}
         self.input.clear()
-        self._add_user_message(text)
+        self._add_user_message(text, selection["tags"])
         self._current_bubble = None
         self._last_tool_chip = None
         self._show_thinking()
 
         try:
-            context_block = build_context_block(self.iface)
+            context_block = build_context_block(
+                self.iface, selected_layers=selection["layers"])
         except Exception:
             context_block = ""
         self.backend.send(text, context_block)
@@ -482,8 +586,9 @@ class ChatDock(QDockWidget):
     # ======================================================================
     # Message list helpers
     # ======================================================================
-    def _add_user_message(self, text):
+    def _add_user_message(self, text, tags=None):
         bubble = MessageBubble("user", self.t)
+        bubble.set_tags(tags)
         self._add_widget(bubble)
         bubble.set_text(text)
 
@@ -565,6 +670,14 @@ class ChatDock(QDockWidget):
     # Teardown
     # ======================================================================
     def shutdown(self):
+        if self._layer_selection_model is not None:
+            try:
+                self._layer_selection_model.selectionChanged.disconnect(
+                    self._on_layer_selection_changed)
+            except (RuntimeError, TypeError):
+                pass
+            self._layer_selection_model = None
+            self._layer_tree_view = None
         if self.backend is not None:
             try:
                 self.backend.cancel()

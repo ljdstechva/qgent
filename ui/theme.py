@@ -125,6 +125,15 @@ QToolButton#QgentCopyBtn {{
 }}
 QToolButton#QgentCopyBtn:hover {{ color: {t.text}; background: {t.surface_hi}; }}
 
+/* ---- selected-layer context ---- */
+#QgentContextStrip {{ background: transparent; border: none; }}
+QLabel#QgentContextChip, QLabel#QgentMessageTag {{
+    color: {t.text_muted}; background: {t.chip_bg};
+    border: 1px solid {t.border}; border-radius: 8px;
+    padding: 2px 7px; font-size: 9px;
+}}
+#QgentMessageTags {{ background: transparent; }}
+
 /* ---- approval card ---- */
 #QgentApproval {{
     background: {t.warn_bg}; border: 1px solid {t.warn};

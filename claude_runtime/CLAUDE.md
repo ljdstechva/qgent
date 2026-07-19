@@ -22,6 +22,9 @@ A **compact live project context is auto-injected at the top of every user
 message.** Trust it for grounding; only call `get_project_context` when you need
 detail beyond it (e.g. full field lists).
 
+- `USER-SELECTED LAYERS` in that context are the layers the request refers to
+  unless the message says otherwise.
+
 ## Subagents (Task tool)
 - **data-scout** (light) — inspects layers/CRS/attributes/paths; validates data
   sources. Read-only. Returns *facts with evidence*.

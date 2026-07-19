@@ -53,6 +53,9 @@ class MessageBubble(QWidget):
         self._text = ""
         self._streaming = False
         self._caret_on = True
+        self._tags = ()
+        self.tags_wrap = None
+        self.tags_layout = None
 
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
@@ -76,6 +79,13 @@ class MessageBubble(QWidget):
             inner.setContentsMargins(12, 8, 12, 6)
             row.addStretch(15)           # ≤ ~85% width, right-aligned
             row.addWidget(self.frame, 85)
+            self.tags_wrap = QWidget()
+            self.tags_wrap.setObjectName("QgentMessageTags")
+            self.tags_layout = QHBoxLayout(self.tags_wrap)
+            self.tags_layout.setContentsMargins(0, 0, 0, 2)
+            self.tags_layout.setSpacing(4)
+            self.tags_wrap.hide()
+            inner.addWidget(self.tags_wrap)
             stamp_row = QHBoxLayout()
             stamp_row.addStretch(1)
             stamp_row.addWidget(self.stamp)
@@ -121,6 +131,27 @@ class MessageBubble(QWidget):
 
     def text(self):
         return self._text
+
+    def set_tags(self, tags):
+        """Render and freeze the layer-selection tags for this message."""
+        if self.role != "user" or self.tags_layout is None:
+            return
+        self._tags = tuple(str(tag) for tag in (tags or []) if str(tag).strip())
+        while self.tags_layout.count():
+            item = self.tags_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        for tag in self._tags:
+            pill = QLabel("📎 " + tag)
+            pill.setObjectName("QgentMessageTag")
+            pill.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+            self.tags_layout.addWidget(pill)
+        self.tags_layout.addStretch(1)
+        self.tags_wrap.setVisible(bool(self._tags))
+
+    def tags(self):
+        return self._tags
 
     def _toggle_caret(self):
         self._caret_on = not self._caret_on
@@ -365,6 +396,63 @@ class ApprovalCard(QFrame):
         self.deny_btn.setEnabled(False)
         self.approve_btn.setText("✅ Approved" if approved else "🚫 Denied")
         self.decided.emit(approved)
+
+
+# ===========================================================================
+# Selected-layer context
+# ===========================================================================
+class ContextChip(QLabel):
+    """One compact live-selection chip."""
+
+    def __init__(self, text, parent=None):
+        super().__init__(text, parent)
+        self.setObjectName("QgentContextChip")
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+
+
+class ContextStrip(QFrame):
+    """Live selected-node strip shown directly above the composer."""
+
+    MAX_VISIBLE = 5
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("QgentContextStrip")
+        self._items = ()
+        self._labels = ()
+        self._layout = QHBoxLayout(self)
+        self._layout.setContentsMargins(2, 0, 2, 0)
+        self._layout.setSpacing(4)
+        self.hide()
+
+    def set_items(self, items):
+        self._items = tuple(dict(item) for item in (items or []))
+        while self._layout.count():
+            item = self._layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+        labels = [self._item_label(item) for item in self._items]
+        visible = labels[:self.MAX_VISIBLE]
+        if len(labels) > self.MAX_VISIBLE:
+            visible.append(f"+{len(labels) - self.MAX_VISIBLE} more")
+        self._labels = tuple(visible)
+        for label in self._labels:
+            self._layout.addWidget(ContextChip(label))
+        self._layout.addStretch(1)
+        self.setVisible(bool(labels))
+
+    def displayed_labels(self):
+        return self._labels
+
+    @staticmethod
+    def _item_label(item):
+        name = str(item.get("name") or "unnamed")
+        if item.get("kind") == "group":
+            count = int(item.get("layer_count") or 0)
+            return f"📁 {name} ({count} layers)"
+        return f"🗂 {name}"
 
 
 # ===========================================================================
