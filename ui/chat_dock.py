@@ -7,9 +7,12 @@ Owns, for the panel's lifetime:
   * the active agent backend and its per-turn signals,
   * message rendering (bubbles, tool chips, subagent chips, approval cards).
 """
+import csv
+import datetime
 import json
 import os
 import secrets
+import time
 
 from qgis.PyQt.QtCore import Qt, QTimer
 from qgis.PyQt.QtWidgets import (
@@ -41,6 +44,7 @@ class ChatDock(QDockWidget):
         self._current_bubble = None
         self._last_tool_chip = None
         self._subagent_chips = {}
+        self._perf = None
 
         self._build_ui()
         self._start_bridge()
@@ -221,6 +225,14 @@ class ChatDock(QDockWidget):
                 "path in ⚙ Settings.")
             return
 
+        marker = text.split(maxsplit=1)[0].upper()
+        task_id = marker[1:-1] if marker in (
+            "[T1]", "[T2]", "[T3]", "[T4]", "[T5]", "[T6]", "[SMOKE]") else "adhoc"
+        backend = config.get(config.K_BACKEND)
+        self._perf = {"start": time.monotonic(), "task_id": task_id,
+                      "ttft_ms": None, "tool_calls": 0, "delegations": 0,
+                      "backend": backend,
+                      "model": config.get(config.K_MODEL_SUPERVISOR) if backend == "claude" else ""}
         self.input.clear()
         self._add_user_message(text)
         self._current_bubble = None
@@ -236,10 +248,12 @@ class ChatDock(QDockWidget):
         if self.backend is not None:
             self.backend.cancel()
             self.status.setText("Stopped.")
+            self._finish_perf()
 
     def new_session(self):
         if self.backend is not None and self.backend.is_busy():
             self.backend.cancel()
+            self._finish_perf()
         # Fresh session id; keep the same bridge (port/token still valid).
         self._build_backend()
         self._clear_messages()
@@ -258,6 +272,8 @@ class ChatDock(QDockWidget):
     # Backend signal handlers
     # ======================================================================
     def _on_token(self, text):
+        if self._perf is not None and self._perf["ttft_ms"] is None:
+            self._perf["ttft_ms"] = round((time.monotonic() - self._perf["start"]) * 1000)
         if self._current_bubble is None:
             self._current_bubble = MessageBubble("assistant")
             self._add_widget(self._current_bubble)
@@ -265,6 +281,8 @@ class ChatDock(QDockWidget):
         self._scroll_to_bottom()
 
     def _on_tool_call(self, name, args):
+        if self._perf is not None:
+            self._perf["tool_calls"] += 1
         self._current_bubble = None
         chip = ToolChip(name, args)
         self._last_tool_chip = chip
@@ -278,6 +296,8 @@ class ChatDock(QDockWidget):
     def _on_subagent_event(self, name, status):
         self._current_bubble = None
         if status == "started":
+            if self._perf is not None:
+                self._perf["delegations"] += 1
             chip = SubagentChip(name)
             self._subagent_chips[name] = chip
             self._add_widget(chip)
@@ -295,11 +315,31 @@ class ChatDock(QDockWidget):
     def _on_done(self, _result):
         self._current_bubble = None
         self.status.setText("Ready.")
+        self._finish_perf()
 
     def _on_error(self, message):
         self._current_bubble = None
         self._add_error(message)
         self.status.setText("Error.")
+        self._finish_perf()
+
+    def _finish_perf(self):
+        turn = self._perf
+        if turn is None:
+            return
+        self._perf = None
+        path = os.path.join(os.environ["TEMP"], "qgis_copilot_perf.csv")
+        add_header = not os.path.exists(path) or os.path.getsize(path) == 0
+        row = [datetime.datetime.now().astimezone().isoformat(timespec="milliseconds"),
+               turn["task_id"], turn["ttft_ms"] if turn["ttft_ms"] is not None else "",
+               round((time.monotonic() - turn["start"]) * 1000), turn["tool_calls"],
+               turn["delegations"], turn["backend"], turn["model"]]
+        with open(path, "a", newline="", encoding="utf-8") as fh:
+            writer = csv.writer(fh)
+            if add_header:
+                writer.writerow(["timestamp", "task_id", "ttft_ms", "total_ms", "tool_calls",
+                                 "delegations", "backend", "model"])
+            writer.writerow(row)
 
     def _on_busy_changed(self, busy):
         self.send_btn.setEnabled(not busy)
