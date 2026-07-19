@@ -1,0 +1,17 @@
+[general]
+name=QGIS Copilot
+qgisMinimumVersion=3.28
+qgisMaximumVersion=4.99
+description=Chat agent panel that drives PyQGIS/Processing through your existing Claude Code or Codex CLI subscription. No API keys.
+about=A dockable chat panel where you describe GIS work in natural language and an agent team (Supervisor + specialist subagents) plans and executes PyQGIS/Processing directly in your open project. Powered by the Claude Code CLI (Claude Pro/Max) or Codex CLI (ChatGPT) — authenticates through your existing subscription, no API key billing. Ships with bundled skills, subagents, and an MCP execution bridge pre-configured.
+version=0.1.0
+author=LJDS
+email=ljdstechva@gmail.com
+tracker=https://example.com/qgis-copilot/issues
+repository=https://example.com/qgis-copilot
+tags=python,agent,ai,llm,chat,automation,pyqgis,processing,claude,codex
+category=Plugins
+icon=resources/icon.svg
+experimental=True
+deprecated=False
+hasProcessingProvider=no

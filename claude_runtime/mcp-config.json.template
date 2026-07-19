@@ -1,0 +1,14 @@
+{
+  "_comment": "This is a REFERENCE template. The plugin generates the real mcp-config.json next to this file at session start, filling in the live Python path, bridge script path, and the per-session bridge port + auth token. Do not edit the generated file by hand.",
+  "mcpServers": {
+    "qgis": {
+      "command": "<python-executable>",
+      "args": ["<plugin-dir>/bridge/mcp_stdio_bridge.py"],
+      "env": {
+        "QGIS_COPILOT_HOST": "127.0.0.1",
+        "QGIS_COPILOT_PORT": "<ephemeral-port>",
+        "QGIS_COPILOT_TOKEN": "<per-session-hex-token>"
+      }
+    }
+  }
+}
