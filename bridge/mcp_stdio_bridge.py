@@ -100,6 +100,24 @@ TOOLS = [
             },
         },
     },
+    {
+        "name": "stat_path",
+        "description": (
+            "Return strictly read-only metadata for one filesystem path as "
+            "JSON: existence, file/directory type, byte size, and ISO mtime. "
+            "Does not read file contents, list directories, or write anything."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Exact file or directory path to inspect.",
+                },
+            },
+            "required": ["path"],
+        },
+    },
 ]
 
 

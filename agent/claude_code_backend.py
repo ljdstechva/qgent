@@ -23,6 +23,7 @@ _ALLOWED_TOOLS = ",".join([
     "mcp__qgis__run_processing",
     "mcp__qgis__get_layer_features",
     "mcp__qgis__render_map_snapshot",
+    "mcp__qgis__stat_path",
     "Task", "TodoWrite", "Read", "Glob", "Grep",
 ])
 _DISALLOWED_TOOLS = ",".join([

@@ -9,10 +9,12 @@ and sets ``payload['event']`` so the worker can wake and reply to the CLI.
 Nothing here blocks on user input — the destructive-code approval gate runs in
 the dock *before* work reaches this executor.
 """
+import contextlib
+from datetime import datetime, timezone
 import io
 import json
 import os
-import contextlib
+import stat
 import tempfile
 import traceback
 
@@ -197,6 +199,31 @@ class MainThreadExecutor(QObject):
             canvas.saveAsImage(path)
         return json.dumps({"snapshot_path": path,
                            "note": "PNG of the current QGIS canvas"})
+
+    def _tool_stat_path(self, args):
+        path = args.get("path")
+        if not isinstance(path, str) or not path:
+            return "ERROR: missing 'path'"
+        try:
+            metadata = os.stat(path)
+        except FileNotFoundError:
+            return json.dumps({
+                "exists": False,
+                "is_file": False,
+                "is_dir": False,
+                "size_bytes": None,
+                "mtime": None,
+            })
+        payload = {
+            "exists": True,
+            "is_file": stat.S_ISREG(metadata.st_mode),
+            "is_dir": stat.S_ISDIR(metadata.st_mode),
+            "size_bytes": metadata.st_size,
+            "mtime": datetime.fromtimestamp(
+                metadata.st_mtime, tz=timezone.utc
+            ).isoformat(),
+        }
+        return json.dumps(payload)
 
     # -- lookup -------------------------------------------------------------
     def _find_layer(self, name_or_id):

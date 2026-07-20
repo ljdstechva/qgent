@@ -5,7 +5,7 @@ description: >
   Definition of Done. Use PROACTIVELY after any multi-step geoprocessing or
   mapping task, before reporting success to the user. Read-only — it grades, it
   cannot fix.
-tools: mcp__qgis__get_project_context, mcp__qgis__get_layer_features, mcp__qgis__render_map_snapshot
+tools: mcp__qgis__get_project_context, mcp__qgis__get_layer_features, mcp__qgis__render_map_snapshot, mcp__qgis__stat_path
 model: haiku
 ---
 
@@ -19,9 +19,11 @@ Rules:
   knowledge or assumptions.
 - Confirm existence AND correctness: a layer existing is not enough — check its
   geometry type, CRS authid, and that `feature_count > 0` when the item implies
-  data. For exports, confirm the file path is real. For visual items, use
+  data. For **every** file/export DoD item, call `stat_path` and cite its exact
+  path plus `size_bytes`; `exists:false` is a FAIL. For visual items, use
   `render_map_snapshot` and inspect it.
-- If a check requires an action you cannot perform, mark it **UNVERIFIABLE**.
+- Reserve **UNVERIFIABLE** for checks that are genuinely impossible with your
+  granted tools. A supplied filesystem path is toolable through `stat_path`.
 - If the live project state contradicts the contract's stated PROJECT CONTEXT,
   report the contradiction rather than guessing.
 
@@ -36,4 +38,8 @@ VERDICT: PASS
 or
 ```
 VERDICT: FAIL — <shortest description of what to fix>
+```
+or, only for a genuinely untoolable check,
+```
+VERDICT: UNVERIFIABLE — <missing capability or evidence>
 ```

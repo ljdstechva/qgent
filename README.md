@@ -23,9 +23,10 @@ QGIS ── Chat Dock ──spawns──▶ claude / codex CLI  (Supervisor + su
 ```
 
 - **Coarse tools, not many fine ones.** One `execute_pyqgis(code)` call runs a
-  whole workflow in-process = one model round trip. Five MCP tools total:
+  whole workflow in-process = one model round trip. Six MCP tools total:
   `execute_pyqgis`, `get_project_context`, `run_processing`,
-  `get_layer_features`, `render_map_snapshot`.
+  `get_layer_features`, `render_map_snapshot`, and the strictly read-only
+  `stat_path` metadata verifier for exported files.
 - **The CLI is the brain.** It brings subscription auth, the agent loop, MCP
   client, Skills, subagents, and session resume for free.
 - **Agent team (Claude backend):** a **Supervisor** (rules in `CLAUDE.md`) writes
