@@ -1,21 +1,52 @@
 # -*- coding: utf-8 -*-
 """Codex CLI backend (fallback, single-agent mode).
 
-Codex has no ``.claude/agents/`` equivalent, so there are no subagents here: the
-Goal Contract + mandatory self-verification checklist are injected into the
-prompt instead (see context/project_snapshot.py and CLAUDE.md notes). MCP
-servers are registered in ``~/.codex/config.toml`` (the dock writes the entry),
-not via a CLI flag.
+Codex has no ``.claude/agents/`` equivalent, so there are no subagents here.
+The CLI loads the single-agent Goal Contract and self-verification rules from
+``claude_runtime/AGENTS.md``.  Each invocation ignores the user's global Codex
+configuration, disables plugin/app MCP injection, and reconstructs only the
+live ``qgis`` server from the generated runtime MCP JSON.  ``CODEX_HOME`` is
+not relocated, so the user's existing subscription authentication is retained.
 
 One ``QProcess`` per turn: ``codex exec --json`` (first) /
 ``codex exec resume <thread_id> --json`` (subsequent), prompt on stdin. The
 JSON event schema is experimental, so parsing is deliberately tolerant.
 """
+import json
+import os
+
 from qgis.PyQt.QtCore import QProcess, QProcessEnvironment
 
 from .backend_base import AgentBackend
 from .stream_parser import StreamJsonParser
 from .. import config
+
+
+_QGIS_TOOLS = (
+    "get_project_context",
+    "execute_pyqgis",
+    "run_processing",
+    "get_layer_features",
+    "render_map_snapshot",
+    "stat_path",
+)
+
+
+def _toml_literal(value):
+    """Encode the small JSON-compatible subset used by CLI ``-c`` values."""
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=True)
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, list):
+        return "[{}]".format(",".join(_toml_literal(item) for item in value))
+    if isinstance(value, dict):
+        parts = [
+            "{} = {}".format(_toml_literal(key), _toml_literal(item))
+            for key, item in value.items()
+        ]
+        return "{{ {} }}".format(", ".join(parts))
+    raise TypeError("Unsupported Codex MCP configuration value.")
 
 
 class CodexBackend(AgentBackend):
@@ -45,17 +76,29 @@ class CodexBackend(AgentBackend):
         if model_choice["note"]:
             self.status_note.emit(model_choice["note"])
 
+        try:
+            isolation_args, mcp_environment = self._isolation_config()
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            self.last_stderr = (
+                "Could not load the live QGIS MCP configuration: {}".format(exc)
+            )
+            self.error.emit(self.last_stderr)
+            return
+
         if self.session_id:
             args = [
-                "exec", "resume", self.session_id,
+                "exec", "resume", *isolation_args, self.session_id,
                 "--model", self.last_model_id, "--json",
             ]
         else:
-            args = ["exec", "--model", self.last_model_id, "--json"]
+            args = [
+                "exec", *isolation_args,
+                "--model", self.last_model_id, "--json",
+            ]
 
         self.proc = QProcess(self)
         self.proc.setWorkingDirectory(self.runtime_dir)
-        self.proc.setProcessEnvironment(self._qenv())
+        self.proc.setProcessEnvironment(self._qenv(mcp_environment))
         self.proc.readyReadStandardOutput.connect(self._on_stdout)
         self.proc.finished.connect(self._on_finished)
 
@@ -74,13 +117,69 @@ class CodexBackend(AgentBackend):
         self.proc.write(prompt.encode("utf-8"))
         self.proc.closeWriteChannel()
 
+    def _isolation_config(self):
+        """Return isolated CLI args plus secret-safe child environment values."""
+        with open(self.mcp_config_path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        if not isinstance(payload, dict):
+            raise ValueError("MCP configuration root must be an object")
+        server = (payload.get("mcpServers") or {}).get("qgis")
+        if not isinstance(server, dict):
+            raise ValueError("missing mcpServers.qgis entry")
+
+        command = server.get("command")
+        arguments = server.get("args", [])
+        environment = server.get("env", {})
+        if not isinstance(command, str) or not command:
+            raise ValueError("mcpServers.qgis.command must be a non-empty string")
+        if not isinstance(arguments, list) or not all(
+                isinstance(item, str) for item in arguments):
+            raise ValueError("mcpServers.qgis.args must be a string array")
+        if not isinstance(environment, dict) or not all(
+                isinstance(key, str) and isinstance(value, str)
+                for key, value in environment.items()):
+            raise ValueError("mcpServers.qgis.env must contain string values")
+
+        mcp_environment = {
+            key: os.environ[key]
+            for key in ("PYTHONHOME", "PYTHONPATH")
+            if os.environ.get(key)
+        }
+        mcp_environment.update(environment)
+
+        isolation_args = [
+            "--ignore-user-config",
+            "--skip-git-repo-check",
+            "--disable", "plugins",
+            "--disable", "remote_plugin",
+            "--disable", "apps",
+            "--disable", "enable_mcp_apps",
+            "-c", 'approval_policy="never"',
+            "-c", "mcp_servers.qgis.command={}".format(
+                _toml_literal(command)),
+            "-c", "mcp_servers.qgis.args={}".format(
+                _toml_literal(arguments)),
+            "-c", "mcp_servers.qgis.env_vars={}".format(
+                _toml_literal(list(mcp_environment))),
+            "-c", "shell_environment_policy.exclude={}".format(
+                _toml_literal(list(environment))),
+            "-c", "mcp_servers.qgis.enabled=true",
+            "-c", "mcp_servers.qgis.required=true",
+            "-c", 'mcp_servers.qgis.default_tools_approval_mode="approve"',
+            "-c", "mcp_servers.qgis.enabled_tools={}".format(
+                _toml_literal(list(_QGIS_TOOLS))),
+        ]
+        return isolation_args, mcp_environment
+
     def cancel(self):
         if self.is_busy():
             self.proc.kill()
 
-    def _qenv(self):
+    def _qenv(self, mcp_environment=None):
         qenv = QProcessEnvironment.systemEnvironment()
         for key, val in (self.env or {}).items():
+            qenv.insert(key, str(val))
+        for key, val in (mcp_environment or {}).items():
             qenv.insert(key, str(val))
         return qenv
 

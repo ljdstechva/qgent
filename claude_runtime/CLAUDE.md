@@ -108,3 +108,11 @@ If you are running under Codex (no Task/subagents), operate **single-agent**: do
 the work yourself, but still write the Goal Contract and, before declaring done,
 run an explicit **self-verification pass** — re-read the live project with the
 tools and check each DoD item with evidence, exactly as qa-verifier would.
+
+## Maintenance sync contract
+
+`AGENTS.md` is this file's Codex-facing sibling. Any change to the shared Goal
+Contract, grounding rule, evidence requirements, `USER-SELECTED LAYERS`
+interpretation, or `stat_path` export verification rule must update both files
+in the same change. Team/delegation rules remain Claude-specific; Codex's
+single-agent and self-verification rules remain `AGENTS.md`-specific.

@@ -127,13 +127,17 @@ prepare/review an AI repair, or restore a verified backup.
 - The Claude backend is restricted to the QGIS MCP tools + `Task` + read-only
   builtins; `Bash`/`Write`/`Edit`/web tools are disallowed.
 
-## Codex backend caveat
+## Codex backend
 
-Codex has no `.claude/agents/` subagent system. On the Codex backend the plugin
-runs **single-agent**: the same Goal Contract + a mandatory self-verification
-pass are injected into the prompt (`CLAUDE.md` "Codex backend" section) instead
-of a separate qa-verifier. The event-stream schema is experimental, so parsing
-is best-effort. **Claude Code is the reference backend.**
+Codex has no `.claude/agents/` subagent system, so it runs **single-agent** and
+loads its Goal Contract, grounding rules, and mandatory self-verification pass
+from `claude_runtime/AGENTS.md`. Every Codex invocation uses supported CLI
+configuration overrides to ignore the user's global config, disable plugin/app
+MCP injection, and expose only the live `qgis` MCP server reconstructed from
+QGent's generated runtime configuration. `CODEX_HOME` is not relocated, so
+ChatGPT subscription authentication remains available. The event-stream schema
+is experimental, so parsing remains tolerant. **Claude Code is the reference
+backend.**
 
 ## Layout
 
@@ -148,6 +152,7 @@ qgis_chat_agent/
 ├── context/       project_snapshot.py
 ├── claude_runtime/          # CLI working directory (bundled)
 │   ├── CLAUDE.md            # Supervisor rules + Goal Contract template
+│   ├── AGENTS.md            # Codex single-agent rules + self-verification
 │   ├── mcp-config.json.template
 │   └── .claude/
 │       ├── agents/         data-scout, geoprocessor, cartographer, qa-verifier
