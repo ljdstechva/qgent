@@ -21,10 +21,12 @@ import os
 import secrets
 import time
 
-from qgis.PyQt.QtCore import Qt, QTimer, QCoreApplication
+from qgis.PyQt.QtCore import (
+    Qt, QTimer, QCoreApplication, QSettings, QStandardPaths,
+)
 from qgis.PyQt.QtWidgets import (
     QDockWidget, QWidget, QVBoxLayout, QHBoxLayout, QScrollArea, QLabel,
-    QToolButton, QFrame,
+    QToolButton, QFrame, QMenu, QFileDialog, QMessageBox, QApplication,
 )
 from qgis.core import (
     QgsApplication, QgsLayerTreeGroup, QgsLayerTreeLayer, QgsMessageLog,
@@ -43,6 +45,10 @@ from ..bridge.qgis_socket_server import BridgeServer
 from ..bridge.main_thread_executor import MainThreadExecutor
 from ..context.project_snapshot import build_context_block, snapshot_layer
 from ..history import HistoryStore, bounded_json_value, clipped_text
+from ..export import (
+    default_export_name, plugin_version, read_history_jsonl, render_markdown,
+    write_markdown, write_pdf,
+)
 
 _SUGGESTIONS = [
     "What CRS is this project?",
@@ -128,6 +134,20 @@ class ChatDock(QDockWidget):
         self.session_label = QLabel("new session")
         self.session_label.setObjectName("QgentSessionPill")
         top.addWidget(self.session_label)
+        self.export_btn = QToolButton()
+        self.export_btn.setObjectName("QgentIconBtn")
+        self.export_btn.setText("⇩")
+        self.export_btn.setToolTip("Export conversation")
+        self.export_btn.setCursor(Qt.PointingHandCursor)
+        self.export_btn.setPopupMode(QToolButton.InstantPopup)
+        export_menu = QMenu(self.export_btn)
+        export_menu.addAction(
+            "Export as Markdown…", lambda: self._export_chat("md"))
+        export_menu.addAction(
+            "Export as PDF…", lambda: self._export_chat("pdf"))
+        self.export_btn.setMenu(export_menu)
+        self.export_btn.setEnabled(False)
+        top.addWidget(self.export_btn)
         self.new_btn = QToolButton()
         self.new_btn.setObjectName("QgentIconBtn")
         self.new_btn.setText("✚")
@@ -323,21 +343,127 @@ class ChatDock(QDockWidget):
             warning = self._history_state.get("warning") or ""
             if warning:
                 self._log_history_warning(warning)
+            self._update_export_enabled(
+                bool(self._history_state.get("records")))
         except Exception as exc:
             self.history_store = None
             self._history_state = {"session": {}, "records": []}
             self._log_history_warning(
                 f"History startup failed: {type(exc).__name__}: {exc}")
+            self._update_export_enabled(False)
 
     def _history_append(self, kind, **fields):
         if self._history_replaying or self.history_store is None:
             return None
         try:
-            return self.history_store.append(kind, **fields)
+            record = self.history_store.append(kind, **fields)
+            self._update_export_enabled(True)
+            return record
         except Exception as exc:
             self._log_history_warning(
                 f"History append failed: {type(exc).__name__}: {exc}")
             return None
+
+    def _update_export_enabled(self, has_records=None):
+        button = getattr(self, "export_btn", None)
+        if button is None:
+            return
+        if has_records is None:
+            has_records = bool(
+                self.history_store is not None
+                and self.history_store.path.is_file()
+                and self.history_store.path.stat().st_size > 0
+            )
+        button.setEnabled(bool(has_records))
+
+    def _export_chat(self, extension):
+        """Export the persisted current conversation; never scrape widgets."""
+        if self.history_store is None:
+            return
+        try:
+            history = read_history_jsonl(self.history_store.path)
+        except Exception as exc:
+            self._export_failed(exc)
+            return
+        records = list(history.get("records") or [])
+        if not records:
+            self._update_export_enabled(False)
+            return
+
+        project = QgsProject.instance()
+        project_path = str(project.fileName() or "")
+        project_name = str(project.title() or "").strip()
+        if not project_name and project_path:
+            project_name = os.path.splitext(os.path.basename(project_path))[0]
+        project_name = project_name or "unsaved"
+        filename = default_export_name(
+            project_path, project_name, extension,
+            today=datetime.date.today(),
+        )
+        settings = QSettings()
+        last_dir = str(settings.value(
+            "QgisCopilot/export_last_directory", "") or "")
+        if not os.path.isdir(last_dir):
+            last_dir = (
+                os.path.dirname(project_path) if project_path else
+                QStandardPaths.writableLocation(QStandardPaths.DocumentsLocation)
+            )
+        default_path = os.path.join(last_dir, filename)
+        file_filter = (
+            "Markdown files (*.md)" if extension == "md"
+            else "PDF files (*.pdf)"
+        )
+        target, _selected_filter = QFileDialog.getSaveFileName(
+            self, "Export QGent conversation", default_path, file_filter)
+        if not target:
+            return
+        suffix = "." + extension
+        if not target.lower().endswith(suffix):
+            target += suffix
+
+        session = dict(history.get("session") or {})
+        metadata = {
+            "project_name": project_name,
+            "project_path": project_path or "(unsaved)",
+            "backend": session.get("backend") or self._backend_kind
+                       or config.get(config.K_BACKEND),
+            "model": session.get("model") or self._current_model(),
+            "version": plugin_version(self.plugin_dir),
+        }
+        in_progress = bool(
+            self._active_turn is not None
+            or (self.backend is not None and self.backend.is_busy()))
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            QApplication.processEvents()
+            markdown = render_markdown(
+                records, metadata, in_progress=in_progress)
+            QApplication.processEvents()
+            if extension == "md":
+                write_markdown(target, markdown)
+            else:
+                write_pdf(target, markdown, title=(
+                    "QGent Chat — " + project_name))
+            settings.setValue(
+                "QgisCopilot/export_last_directory",
+                os.path.dirname(os.path.abspath(target)),
+            )
+            settings.sync()
+            self._set_activity("Exported chat to {}.".format(
+                os.path.basename(target)))
+        except Exception as exc:
+            self._export_failed(exc)
+        finally:
+            QApplication.restoreOverrideCursor()
+            QApplication.processEvents()
+
+    def _export_failed(self, exc):
+        self._set_activity("Chat export failed.")
+        QMessageBox.critical(
+            self, "QGent export failed",
+            "Could not export this conversation:\n{}: {}".format(
+                type(exc).__name__, exc),
+        )
 
     def _history_update_session(self):
         if self.history_store is None or self.backend is None:
@@ -701,6 +827,7 @@ class ChatDock(QDockWidget):
                     f"Could not clear history: {type(exc).__name__}: {exc}")
                 self._set_activity("Could not clear chat history.")
                 return
+        self._update_export_enabled(False)
         if self.backend is not None and self.backend.is_busy():
             try:
                 self.backend.blockSignals(True)
