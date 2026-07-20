@@ -1,176 +1,222 @@
-# QGent — A QGIS AI Agent
+<p align="center">
+  <img src="resources/icon.svg" alt="QGent icon" width="104">
+</p>
 
-A dockable **AI agent** inside QGIS. Describe a GIS task in plain language —
-*"load this DEM and delineate the watershed"*, *"make an A3 vicinity map in
-EPSG:32651"* — and an agent team plans and executes **PyQGIS / Processing**
-directly in your open project, streaming its reasoning back into the panel and
-asking approval before anything destructive.
+# QGent — An AI Agent Inside QGIS
 
-Powered by your **existing Claude or ChatGPT subscription** through the
-**Claude Code CLI** (primary) or **Codex CLI** (fallback). **No API keys, no
-per-token billing.**
+<p align="center">
+  Turn plain-language GIS requests into live PyQGIS and Processing workflows in your open QGIS project.
+</p>
 
----
+<p align="center">
+  <img alt="QGIS 3.28+" src="https://img.shields.io/badge/QGIS-3.28%2B-589632?logo=qgis&logoColor=white">
+  <img alt="QGent 0.2.0" src="https://img.shields.io/badge/QGent-0.2.0-0f9d91">
+  <img alt="Claude Code or Codex" src="https://img.shields.io/badge/backend-Claude%20Code%20%7C%20Codex-5b5bd6">
+  <img alt="Experimental" src="https://img.shields.io/badge/status-experimental-orange">
+</p>
 
-## How it works
+QGent is an experimental dockable QGIS plugin for AI-assisted GIS work. Ask it
+to inspect the current project, transform data, run Processing algorithms,
+style layers, build layouts, or export results. QGent executes PyQGIS directly
+inside QGIS, streams progress into the chat panel, and pauses for approval
+before destructive operations.
 
+It uses an existing **Claude Code** or **Codex** CLI login. You do not place an
+API key in the plugin.
+
+## What QGent can do
+
+- Read live project, canvas, CRS, layer, field, selection, and layout context.
+- Run multi-step PyQGIS and QGIS Processing workflows from natural language.
+- Keep the layer selection attached to a request so the agent uses the layer
+  you meant, even if the UI selection changes later.
+- Add or style layers, run buffers and overlays, inspect features, create map
+  layouts, and export GIS deliverables.
+- Require inline approval for file writes, deletes, edit commits, overwrites,
+  and other destructive code.
+- Restore per-project chat history after QGIS restarts.
+- Export a conversation to Markdown or a searchable A4 PDF for project
+  documentation and audit trails.
+- Verify exported files through a strictly read-only metadata tool before
+  reporting success.
+- Diagnose common installation and runtime problems through the built-in
+  Doctor and the detached, review-gated External Doctor.
+
+Example requests:
+
+```text
+What CRS is this project?
+
+Buffer the selected layer by 100 m and add the result.
+
+Apply categorized symbology to landuse using the class field.
+
+Build an A3 vicinity map centred on 14.676, 121.044 with a scale bar,
+north arrow, legend, and PDF export.
 ```
-QGIS ── Chat Dock ──spawns──▶ claude / codex CLI  (Supervisor + subagents)
-  │                                   │ calls MCP tools
-  │  Socket server (127.0.0.1, token) ◀── mcp_stdio_bridge.py (stdlib) ◀── CLI
-  │        │ queued signal
-  └ Main-thread executor ── runs PyQGIS on the GUI thread ── live project
+
+## Screenshots
+
+These screenshots come from QGent's isolated test profile.
+
+| Backend-aware model settings | Detached External Doctor |
+|---|---|
+| <img src="docs/images/qgent-codex-settings.png" alt="QGent Codex backend and model settings" width="480"> | <img src="docs/images/qgent-external-doctor.png" alt="QGent External Doctor diagnostics and repair handoff" width="480"> |
+
+## Requirements
+
+- QGIS **3.28 or newer**. The current release was live-tested on QGIS
+  **3.44.8** on Windows 11.
+- One authenticated CLI:
+  - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) with a
+    compatible Claude subscription; or
+  - [Codex CLI](https://developers.openai.com/codex/cli) with a compatible
+    ChatGPT subscription.
+
+Claude Code is the reference backend and supports QGent's specialist agent
+team. Codex runs as a single agent with the same live QGIS tools and mandatory
+self-verification rules.
+
+## Installation
+
+### Clone into the QGIS plugin folder
+
+Close QGIS, then run this in PowerShell for the default QGIS profile:
+
+```powershell
+git clone https://github.com/ljdstechva/qgent.git "$env:APPDATA\QGIS\QGIS3\profiles\default\python\plugins\qgent"
 ```
 
-- **Coarse tools, not many fine ones.** One `execute_pyqgis(code)` call runs a
-  whole workflow in-process = one model round trip. Six MCP tools total:
-  `execute_pyqgis`, `get_project_context`, `run_processing`,
-  `get_layer_features`, `render_map_snapshot`, and the strictly read-only
-  `stat_path` metadata verifier for exported files.
-- **The CLI is the brain.** It brings subscription auth, the agent loop, MCP
-  client, Skills, subagents, and session resume for free.
-- **Agent team (Claude backend):** a **Supervisor** (rules in `CLAUDE.md`) writes
-  a **Goal Contract**, delegates to **data-scout / geoprocessor / cartographer**,
-  and a read-only **qa-verifier** confirms the Definition of Done against the
-  *live project* before you're told it's done. This is the anti-drift /
-  anti-hallucination core.
+Alternatively, download the repository ZIP, extract it, rename the extracted
+folder to `qgent`, and place it in:
 
-## Architecture decisions (vs. the original plan)
+```text
+%APPDATA%\QGIS\QGIS3\profiles\default\python\plugins\qgent
+```
 
-| Topic | Decision | Why |
-|---|---|---|
-| Session continuity | Per-turn process spawn with `--resume <session_id>` | Robust and trivially cancellable; no fragile long-lived stdin pipe |
-| Execution marshalling | stdlib socket server in a daemon thread → Qt signal + `threading.Event` → main-thread `MainThreadExecutor` | Avoids `invokeMethod` return-value pain; GUI stays responsive; parallel subagent calls serialize safely on the main thread |
-| Approval gate | Lives on the **QGIS side** (socket server AST-scans code, signals the dock) — **not** in the stdlib bridge | The bridge is a separate process with no UI; enforcing here covers every subagent regardless of prompt |
-| `<3 s` first token (success criterion #1) | Applies to the **direct** path | A subagent dispatch is a full extra model turn; delegated tasks are inherently slower by design |
-| Heavy geoprocessing | 60 s executor timeout returned to the model + guidance to chunk / use `processing.run` | A single `exec` on the GUI thread can't be preempted; long ops should be split (a real `QgsTask` path is future work) |
+Then:
 
-## Install
+1. Open QGIS.
+2. Go to **Plugins → Manage and Install Plugins → Installed**.
+3. Enable **QGent**.
+4. Open the QGent dock from its toolbar button.
+5. Open **Settings** and confirm the detected Claude Code or Codex CLI path.
 
-1. **Install a CLI and log in** (one of):
-   - Claude Code: `npm i -g @anthropic-ai/claude-code`, then `claude` and sign in
-     with your Claude Pro/Max account. *(Recommended — full agent team.)*
-   - Codex: install the Codex CLI, sign in with your ChatGPT account.
-     *(Single-agent fallback — no subagents; see below.)*
-2. **Install the plugin:** copy the `qgis_chat_agent/` folder into your QGIS
-   plugins directory, or zip it and use *Plugins → Manage and Install → Install
-   from ZIP*. Enable **QGent**.
-3. Click the **QGent** toolbar button. Open **⚙ Settings** if the CLI
-   path wasn't autodetected.
+## Using QGent
 
-## Usage
+1. Open a project and select any layers relevant to your request.
+2. Describe the desired result in the QGent composer.
+3. Review streamed tool activity and any proposed destructive action.
+4. Approve or deny destructive work when prompted.
+5. Inspect the resulting layers, map, or exported files in QGIS.
 
-Type a request and press Enter. Examples:
-- *"Buffer the active layer by 100 m (project to UTM 51N first) and add it."*
-- *"Categorized symbology on `landuse` by the `class` field, then a legend."*
-- *"Build an A3 vicinity map centred on 14.676, 121.044 with scale bar + north arrow, export PDF."*
+The **New** button starts a clean conversation for the current project. The
+export menu beside it writes the persisted conversation as Markdown or PDF.
 
-Tool calls appear as collapsible ⚙ chips; delegated subagents as 🤖 status
-chips. Destructive code (file writes, deletes, `commitChanges`, overwrites) pops
-an inline **Approve / Deny** card — configurable in Settings
-(*ask-destructive* / *ask-always* / *auto*).
+### Backends
 
-### Chat history
+| Backend | Behavior |
+|---|---|
+| Claude Code | Supervisor plus data-scout, geoprocessor, cartographer, and read-only qa-verifier roles. |
+| Codex | Single-agent execution with isolated QGIS-only MCP access and a required self-verification pass. |
 
-QGent restores the current project's conversation after QGIS restarts,
-including message layer tags and final, inert tool/subagent/approval states.
-History is JSON Lines under the active QGIS profile at
-`<QGIS settings dir>/qgent/history/<project-key>.jsonl`; saved projects use a
-SHA-256 key derived from the project filename and unsaved projects use
-`unsaved.jsonl`. The **✚ New** button is the only normal action that deletes
-the current project's active history and resets its CLI session.
+QGent keeps model choices separately for each backend. Its Codex invocation
+preserves the normal authentication home while suppressing unrelated global
+MCP and plugin configuration for the QGent session.
 
-### Doctor and external recovery
+## Safety model
 
-Open **Settings → Doctor** to run live diagnostics and the existing
-deterministic, live-safe self-heal actions. AI repair is handed off to a
-**detached External Doctor** console. The handoff includes the redacted
-diagnostics bundle, recent QGent log ring, your error description, selected
-repair model/effort, and resolved plugin/QGIS paths.
+- `execute_pyqgis` payloads are AST-scanned before execution.
+- Destructive patterns are routed to the dock's **Approve / Deny** gate.
+- The QGIS socket server binds only to `127.0.0.1` and authenticates each
+  request with a per-session token.
+- PyQGIS work is marshalled onto QGIS's main GUI thread.
+- The verifier can inspect export metadata with `stat_path`, but cannot read
+  file contents, enumerate directories, or write files through that tool.
+- The External Doctor works on a disposable copy, displays a proposed diff,
+  and requires an explicit typed confirmation before applying anything.
 
-The External Doctor is stdlib-only and stays alive while QGIS closes or
-restarts. It copies the installed plugin to a disposable directory (always
-excluding `claude_runtime/mcp-config.json`), runs the selected repair model
-there, prints and saves a unified diff, and requires the exact typed answer
-`yes` before any apply. Before applying or restoring, it waits for **zero QGIS
-processes**; it never kills QGIS without a separate explicit `KILL QGIS`
-confirmation, and process-detection failures block changes. Handoff model and
-executable fields are treated as untrusted: the Doctor matches the shared model
-catalog and independently detects/authenticates the owning CLI. Approved changes
-receive a paired installed/source SHA-256 backup, two-tree hash and compile
-verification, and a `doctor:` source commit. Restore first creates a separate
-pre-restore rollback backup and automatically restores it if verification fails.
-Audit events are appended to `<QGIS profile>/qgent/doctor/doctor.log`.
+QGent can still execute powerful code in an open GIS project. Keep the default
+**Ask before destructive operations** setting enabled, inspect proposed
+changes, and maintain normal backups of important project data.
 
-#### Dead-plugin recovery
+## Chat history and exports
 
-If QGent won't load, run **`qgent-doctor.bat` from your QGIS profile folder**:
+Conversation history is stored as JSON Lines under the active QGIS profile:
+
+```text
+<QGIS settings directory>/qgent/history/<project-key>.jsonl
+```
+
+Saved projects use a SHA-256 key derived from the project filename; unsaved
+projects use `unsaved.jsonl`. Exports are generated from these persisted
+records—not by scraping visible widgets—so a restored conversation exports the
+same content as a live one.
+
+## Doctor and recovery
+
+Open **Settings → Doctor** for live diagnostics and deterministic recovery
+actions. AI-assisted repair launches in a detached console so it can continue
+while QGIS closes or restarts. The workflow creates a disposable proposal,
+shows the unified diff, validates the real trees again before apply, creates
+paired backups, and verifies hashes and Python compilation afterward.
+
+If QGent cannot load, close QGIS and run:
 
 ```text
 <QGIS profile>/qgent/qgent-doctor.bat
 ```
 
-QGent regenerates this launcher when missing. It starts
-`doctor_cli.py` in a new console using the recorded Python interpreter, with
-`py` and `python` fallbacks. With QGIS closed, use its numbered menu to
-diagnose, clear caches, quarantine corrupt history, re-detect CLI paths,
-prepare/review an AI repair, or restore a verified backup.
+## Architecture
 
-## Safety
-
-- Every `execute_pyqgis` payload is AST-scanned for destructive patterns
-  **before** it runs, at the bridge — so the gate applies no matter which
-  subagent issued it.
-- The socket server binds `127.0.0.1` on an ephemeral port and authenticates
-  every request with a per-session token, so other local processes can't drive
-  your QGIS.
-- The Claude backend is restricted to the QGIS MCP tools + `Task` + read-only
-  builtins; `Bash`/`Write`/`Edit`/web tools are disallowed.
-
-## Codex backend
-
-Codex has no `.claude/agents/` subagent system, so it runs **single-agent** and
-loads its Goal Contract, grounding rules, and mandatory self-verification pass
-from `claude_runtime/AGENTS.md`. Every Codex invocation uses supported CLI
-configuration overrides to ignore the user's global config, disable plugin/app
-MCP injection, and expose only the live `qgis` MCP server reconstructed from
-QGent's generated runtime configuration. `CODEX_HOME` is not relocated, so
-ChatGPT subscription authentication remains available. The event-stream schema
-is experimental, so parsing remains tolerant. **Claude Code is the reference
-backend.**
-
-## Layout
-
-```
-qgis_chat_agent/
-├── metadata.txt, __init__.py, plugin.py, config.py, history.py
-├── doctor.py, doctor_core.py, doctor_cli.py, model_catalog.py
-├── ui/            chat_dock.py, widgets.py, settings_dialog.py
-├── agent/         backend_base.py, claude_code_backend.py, codex_backend.py,
-│                  stream_parser.py
-├── bridge/        qgis_socket_server.py, main_thread_executor.py, safety.py, mcp_stdio_bridge.py
-├── context/       project_snapshot.py
-├── claude_runtime/          # CLI working directory (bundled)
-│   ├── CLAUDE.md            # Supervisor rules + Goal Contract template
-│   ├── AGENTS.md            # Codex single-agent rules + self-verification
-│   ├── mcp-config.json.template
-│   └── .claude/
-│       ├── agents/         data-scout, geoprocessor, cartographer, qa-verifier
-│       └── skills/         pyqgis-patterns, processing-recipes,
-│                           cartography-print-layout, ph-environmental-maps
-└── resources/     icon.svg
+```text
+QGIS dock
+  ├─ project context + selected-layer tags
+  ├─ per-project history + Markdown/PDF export
+  └─ authenticated loopback socket
+          │
+          ▼
+  stdlib MCP bridge ──► Claude Code or Codex CLI
+          │
+          ▼
+  main-thread executor ──► PyQGIS / QGIS Processing / live project
 ```
 
-## UI
+QGent exposes six coarse MCP tools: `execute_pyqgis`,
+`get_project_context`, `run_processing`, `get_layer_features`,
+`render_map_snapshot`, and `stat_path`. Coarse calls let an agent complete a
+whole GIS step without a large catalogue of fragile, fine-grained tools.
 
-QGent v0.2 ships a redesigned, animated panel: teal→indigo accent theme that
-adapts to light/dark QGIS themes, right-aligned user bubbles + side-rail
-assistant messages, live tool-chip spinners with expandable details, shimmer
-subagent chips with elapsed time, a thinking indicator, a morphing Send⇄Stop
-button, smooth scrolling, and starter suggestion chips. Streamed tokens are
-coalesced (40 ms) so long answers render without stutter. All motion can be
-disabled via *Settings → Appearance → Reduce motion*.
+## Repository layout
 
-> **Status: v0.2 (experimental).** The Claude Code streaming seam was validated
-> against Claude Code 2.1.214 (`--include-partial-messages`); the parser is
-> tolerant of unknown event types, but flag names can change across releases.
+```text
+qgent/
+├── agent/              Claude Code and Codex backends
+├── bridge/             socket server, safety gate, MCP bridge, executor
+├── claude_runtime/     bundled agent rules, specialist roles, and GIS skills
+├── context/            live project snapshot construction
+├── docs/images/        README screenshots
+├── resources/          plugin icon
+├── ui/                 chat dock, settings, animations, and widgets
+├── doctor*.py          diagnostics and detached recovery workflow
+├── export.py           history-to-Markdown/PDF export
+├── history.py          per-project JSONL persistence
+├── metadata.txt        QGIS plugin metadata
+└── plugin.py           QGIS plugin entry point
+```
+
+## Privacy
+
+QGent does not ask you to store an API key in the plugin. Prompts, project
+context, and data returned through agent tools are sent to the selected model
+provider through its authenticated CLI. Review your provider's terms and your
+organization's data-handling rules before using confidential or regulated
+project information.
+
+## Status and feedback
+
+QGent 0.2.0 is experimental. CLI event formats and flags can change, and the
+plugin has not yet been published in the official QGIS plugin repository.
+
+Bug reports and focused feature requests are welcome in
+[GitHub Issues](https://github.com/ljdstechva/qgent/issues).

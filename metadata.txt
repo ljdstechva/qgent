@@ -2,13 +2,13 @@
 name=QGent
 qgisMinimumVersion=3.28
 qgisMaximumVersion=4.99
-description=QGent — A QGIS AI Agent. Chat panel that drives PyQGIS/Processing through your existing Claude Code or Codex CLI subscription. No API keys.
-about=QGent is a dockable AI-agent chat panel: describe GIS work in natural language and an agent team (Supervisor + specialist subagents) plans and executes PyQGIS/Processing directly in your open project. Powered by the Claude Code CLI (Claude Pro/Max) or Codex CLI (ChatGPT) — authenticates through your existing subscription, no API key billing. Ships with bundled skills, subagents, and an MCP execution bridge pre-configured.
+description=QGent — An AI agent inside QGIS. Turn natural-language requests into live PyQGIS and Processing workflows with Claude Code or Codex.
+about=QGent is a dockable AI-agent chat panel for QGIS. It reads live project context, executes PyQGIS and Processing workflows, preserves per-project history, exports Markdown/PDF audit trails, and asks before destructive operations. It uses an existing Claude Code or Codex CLI login, with bundled GIS skills, verification rules, and a local authenticated MCP bridge.
 version=0.2.0
 author=LJDS
 email=ljdstechva@gmail.com
-tracker=https://example.com/qgent/issues
-repository=https://example.com/qgent
+tracker=https://github.com/ljdstechva/qgent/issues
+repository=https://github.com/ljdstechva/qgent
 tags=python,agent,ai,llm,chat,automation,pyqgis,processing,claude,codex
 category=Plugins
 icon=resources/icon.svg
