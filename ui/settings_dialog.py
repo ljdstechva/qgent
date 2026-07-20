@@ -1,21 +1,19 @@
 # -*- coding: utf-8 -*-
 """General settings and Doctor UI for QGent."""
-import json
 import os
 
 from qgis.PyQt.QtCore import Qt
-from qgis.PyQt.QtGui import QTextCursor
 from qgis.PyQt.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QFileDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout, QLabel,
-    QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit, QPushButton,
+    QLineEdit, QPlainTextEdit, QPushButton,
     QScrollArea, QSpinBox, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from .. import config
-from ..agent.repair_backend import RepairBackend
-from ..doctor import (
-    DoctorActionWorker, DoctorService, DoctorWorker, repair_model_options)
+from ..doctor import DoctorService, DoctorWorker, repair_model_options
+from ..doctor_core import (
+    ensure_recovery_entrypoint, launch_detached, write_doctor_request)
 
 
 class SettingsDialog(QDialog):
@@ -24,16 +22,11 @@ class SettingsDialog(QDialog):
         config.migrate_model_settings()
         self.doctor_context = dict(doctor_context or {})
         self.doctor_service = None
-        self.repair_backend = None
         self._diag_worker = None
-        self._action_worker = None
-        self._action_kind = ""
         self._diag_rerun = False
-        self._pending_repair = False
+        self._pending_external_launch = False
         self._last_report = None
-        self._current_proposal = None
         self._chat_busy = False
-        self._repair_busy = False
         self._model_controls = {}
         self._model_memory = {
             backend: {
@@ -160,9 +153,9 @@ class SettingsDialog(QDialog):
         outer = QVBoxLayout(page)
 
         intro = QLabel(
-            "Diagnose QGent, apply only known deterministic remedies, or ask "
-            "a high-power model to propose a repair in a disposable copy. "
-            "AI changes are never applied until you review the diff and click Approve.")
+            "Run live diagnostics and deterministic self-heal here. AI repair "
+            "runs in a detached External Doctor console so it remains available "
+            "while QGIS is closed or restarting.")
         intro.setWordWrap(True)
         outer.addWidget(intro)
 
@@ -183,88 +176,48 @@ class SettingsDialog(QDialog):
         dlay.addLayout(dbuttons)
         self.diag_output = QPlainTextEdit()
         self.diag_output.setReadOnly(True)
-        self.diag_output.setMinimumHeight(180)
+        self.diag_output.setMinimumHeight(220)
         self.diag_output.setPlaceholderText(
             "Run diagnostics to collect CLI, bridge, stream, history, "
             "byte-compile, and QGIS-log evidence.")
         dlay.addWidget(self.diag_output)
         outer.addWidget(diagnostics)
 
-        ai = QGroupBox("AI error-fix — sandboxed proposal")
-        alay = QVBoxLayout(ai)
+        external = QGroupBox("External Doctor — detached repair")
+        elay = QVBoxLayout(external)
         model_row = QFormLayout()
         self.repair_model = QComboBox()
         model_row.addRow("Repair model", self.repair_model)
-        alay.addLayout(model_row)
-        warning = QLabel(
-            "High-effort models can take several minutes. The agent edits only "
-            "a temporary copy; Approve creates a backup before applying anything.")
-        warning.setWordWrap(True)
-        warning.setStyleSheet("color: #9a6500; font-size: 11px;")
-        alay.addWidget(warning)
+        elay.addLayout(model_row)
+        explanation = QLabel(
+            "The External Doctor prepares a disposable proposal, writes and "
+            "prints a unified diff, and changes real files only after you type "
+            "yes in its console. It backs up and verifies every approved apply.")
+        explanation.setWordWrap(True)
+        explanation.setStyleSheet("color: palette(mid); font-size: 11px;")
+        elay.addWidget(explanation)
         self.error_description = QTextEdit()
         self.error_description.setPlaceholderText(
             "Describe the error (optional — diagnostics alone are valid input)")
-        self.error_description.setMaximumHeight(90)
-        alay.addWidget(self.error_description)
-        action_row = QHBoxLayout()
-        self.propose_btn = QPushButton("Diagnose && propose fix")
-        self.propose_btn.clicked.connect(self._start_repair)
-        action_row.addWidget(self.propose_btn)
-        self.cancel_repair_btn = QPushButton("Cancel")
-        self.cancel_repair_btn.setEnabled(False)
-        self.cancel_repair_btn.clicked.connect(self._cancel_repair)
-        action_row.addWidget(self.cancel_repair_btn)
-        action_row.addStretch(1)
-        alay.addLayout(action_row)
-        self.repair_progress = QPlainTextEdit()
-        self.repair_progress.setReadOnly(True)
-        self.repair_progress.setMinimumHeight(130)
-        self.repair_progress.setPlaceholderText("Streaming repair progress")
-        alay.addWidget(self.repair_progress)
-        self.proposal_output = QPlainTextEdit()
-        self.proposal_output.setReadOnly(True)
-        self.proposal_output.setMinimumHeight(180)
-        self.proposal_output.setPlaceholderText(
-            "The agent's explanation and unified diff will appear here for review.")
-        alay.addWidget(self.proposal_output)
-        review_row = QHBoxLayout()
-        self.approve_btn = QPushButton("Approve")
-        self.approve_btn.setEnabled(False)
-        self.approve_btn.clicked.connect(self._approve_proposal)
-        review_row.addWidget(self.approve_btn)
-        self.deny_btn = QPushButton("Deny")
-        self.deny_btn.setEnabled(False)
-        self.deny_btn.clicked.connect(self._deny_proposal)
-        review_row.addWidget(self.deny_btn)
-        review_row.addStretch(1)
-        alay.addLayout(review_row)
-        outer.addWidget(ai)
+        self.error_description.setMaximumHeight(100)
+        elay.addWidget(self.error_description)
+        self.launch_external_btn = QPushButton(
+            "Runs outside QGIS — you can close or restart QGIS during the repair.")
+        self.launch_external_btn.clicked.connect(self._launch_external_doctor)
+        elay.addWidget(self.launch_external_btn)
+        self.external_launch_status = QLabel("")
+        self.external_launch_status.setWordWrap(True)
+        self.external_launch_status.setStyleSheet(
+            "color: palette(mid); font-size: 11px;")
+        elay.addWidget(self.external_launch_status)
+        recovery = QLabel(
+            "If QGent won't load, run qgent-doctor.bat from your QGIS profile "
+            "folder.")
+        recovery.setWordWrap(True)
+        recovery.setStyleSheet("color: #9a6500; font-size: 11px;")
+        elay.addWidget(recovery)
+        outer.addWidget(external)
 
-        backups = QGroupBox("Backups and rollback")
-        blay = QVBoxLayout(backups)
-        self.backup_list = QListWidget()
-        self.backup_list.setMaximumHeight(110)
-        self.backup_list.itemSelectionChanged.connect(
-            self._update_doctor_controls)
-        blay.addWidget(self.backup_list)
-        backup_row = QHBoxLayout()
-        self.restore_btn = QPushButton("Restore selected backup")
-        self.restore_btn.clicked.connect(self._restore_backup)
-        backup_row.addWidget(self.restore_btn)
-        self.reload_btn = QPushButton("Reload plugin")
-        self.reload_btn.setEnabled(False)
-        self.reload_btn.clicked.connect(self._reload_plugin)
-        backup_row.addWidget(self.reload_btn)
-        backup_row.addStretch(1)
-        blay.addLayout(backup_row)
-        fallback = QLabel(
-            "If reload is unavailable or incomplete, restart QGIS to load the "
-            "approved or restored files.")
-        fallback.setWordWrap(True)
-        fallback.setStyleSheet("color: palette(mid); font-size: 11px;")
-        blay.addWidget(fallback)
-        outer.addWidget(backups)
         outer.addStretch(1)
         scroll.setWidget(page)
         return scroll
@@ -403,8 +356,8 @@ class SettingsDialog(QDialog):
 
     def _save_and_accept(self):
         if self._long_operation_running():
-            self._append_progress(
-                "Finish or cancel the active Doctor operation before closing.\n")
+            self.diag_output.appendPlainText(
+                "Finish diagnostics before closing Settings.\n")
             self.tabs.setCurrentIndex(1)
             return
         backend_kind = self.backend.currentData()
@@ -445,36 +398,35 @@ class SettingsDialog(QDialog):
                 "Doctor is available when Settings is opened from the live "
                 "QGent panel.")
             for widget in (self.run_diag_btn, self.auto_repair_btn,
-                           self.propose_btn, self.repair_model,
-                           self.restore_btn):
+                           self.launch_external_btn, self.repair_model):
                 widget.setEnabled(False)
             return
         self.doctor_service = DoctorService(self.doctor_context)
-        self.repair_backend = RepairBackend(self)
-        self.repair_backend.progress.connect(self._append_progress)
-        self.repair_backend.proposal_ready.connect(self._on_proposal_ready)
-        self.repair_backend.failed.connect(self._on_repair_failed)
-        self.repair_backend.cancelled.connect(self._on_repair_cancelled)
-        self.repair_backend.busy_changed.connect(self._on_repair_busy)
         self._refresh_repair_models()
-        self._refresh_backups()
+        try:
+            path = ensure_recovery_entrypoint(
+                self._context_value("profile_dir", ""),
+                self._context_value("plugin_dir", ""),
+                self._context_value(
+                    "python_executable", config.python_executable()),
+                self._context_value("source_repo", ""))
+            self.external_launch_status.setText(
+                f"Recovery entry point ready: {path}")
+        except Exception as exc:
+            self.external_launch_status.setText(
+                f"Recovery entry point could not be prepared: "
+                f"{type(exc).__name__}: {exc}")
         self._update_doctor_controls()
+
+    def _context_value(self, key, default=None):
+        value = self.doctor_context.get(key, default)
+        return value() if callable(value) else value
 
     def _refresh_repair_models(self):
         self.repair_model.clear()
-        cli_paths = self.doctor_context.get("cli_paths")
-        cli_paths = cli_paths() if callable(cli_paths) else cli_paths
+        cli_paths = self._context_value("cli_paths", None)
         for spec in repair_model_options(cli_paths):
             self.repair_model.addItem(spec["label"], spec)
-
-    def _refresh_backups(self):
-        self.backup_list.clear()
-        if self.doctor_service is None:
-            return
-        for path in self.doctor_service.backups():
-            item = QListWidgetItem(path.name)
-            item.setData(Qt.UserRole, str(path))
-            self.backup_list.addItem(item)
 
     def set_chat_busy(self, busy):
         self._chat_busy = bool(busy)
@@ -484,31 +436,16 @@ class SettingsDialog(QDialog):
         available = self.doctor_service is not None
         diag_running = bool(
             self._diag_worker is not None and self._diag_worker.isRunning())
-        action_running = bool(
-            self._action_worker is not None and self._action_worker.isRunning())
-        self.run_diag_btn.setEnabled(
-            available and not diag_running and not action_running)
+        self.run_diag_btn.setEnabled(available and not diag_running)
         failed_repairable = bool(
             self._last_report and any(
                 not item.get("ok") and item.get("repairable")
                 for item in self._last_report.get("checks", [])))
         self.auto_repair_btn.setEnabled(
-            available and failed_repairable and not diag_running
-            and not self._repair_busy and not action_running)
-        can_propose = (
+            available and failed_repairable and not diag_running)
+        self.launch_external_btn.setEnabled(
             available and self.repair_model.count() > 0
-            and not self._chat_busy and not self._repair_busy
-            and not diag_running and not action_running
-            and self._current_proposal is None)
-        self.propose_btn.setEnabled(can_propose)
-        self.cancel_repair_btn.setEnabled(self._repair_busy)
-        review = (self._current_proposal is not None and not self._repair_busy
-                  and not action_running)
-        self.approve_btn.setEnabled(review)
-        self.deny_btn.setEnabled(review)
-        self.restore_btn.setEnabled(
-            available and self.backup_list.currentItem() is not None
-            and not self._repair_busy and not diag_running and not action_running)
+            and not self._chat_busy and not diag_running)
 
     def _run_diagnostics(self):
         if self.doctor_service is None:
@@ -539,13 +476,13 @@ class SettingsDialog(QDialog):
             worker.deleteLater()
         rerun = self._diag_rerun
         self._diag_rerun = False
-        pending = self._pending_repair
-        self._pending_repair = False
+        pending = self._pending_external_launch
+        self._pending_external_launch = False
         self._update_doctor_controls()
         if rerun:
             self._run_diagnostics()
         elif pending and self._last_report is not None:
-            self._start_repair()
+            self._launch_external_doctor()
 
     def _auto_repair(self):
         if self.doctor_service is None or self._last_report is None:
@@ -565,175 +502,88 @@ class SettingsDialog(QDialog):
     def _copy_diagnostics(self):
         QApplication.clipboard().setText(self.diag_output.toPlainText())
 
-    def _start_repair(self):
-        if self.repair_backend is None or self._chat_busy or self._repair_busy:
+    def _launch_external_doctor(self):
+        if self.doctor_service is None or self._chat_busy:
             return
         if self._last_report is None:
-            self._pending_repair = True
+            self._pending_external_launch = True
             self._run_diagnostics()
             return
         spec = self.repair_model.currentData()
         if not spec:
-            self._append_progress("No installed repair CLI/model is available.\n")
+            self.external_launch_status.setText(
+                "No installed repair CLI/model is available.")
             return
-        self._current_proposal = None
-        self.proposal_output.clear()
-        self.repair_progress.clear()
-        self._update_doctor_controls()
-        source_repo = self.doctor_context.get("source_repo", "")
-        source_repo = source_repo() if callable(source_repo) else source_repo
-        self.repair_backend.start(
-            spec,
-            self._last_report.get("bundle") or "",
-            self.error_description.toPlainText(),
-            self.doctor_context.get("plugin_dir"),
-            source_repo,
-            self.doctor_context.get("profile_dir"),
-        )
-
-    def _append_progress(self, text):
-        cursor = self.repair_progress.textCursor()
-        cursor.movePosition(QTextCursor.End)
-        cursor.insertText(str(text))
-        self.repair_progress.setTextCursor(cursor)
-        self.repair_progress.ensureCursorVisible()
-
-    def _on_repair_busy(self, busy):
-        self._repair_busy = bool(busy)
-        self._update_doctor_controls()
-
-    def _on_proposal_ready(self, proposal):
-        self._current_proposal = proposal
-        text = (
-            "AGENT EXPLANATION\n"
-            "=================\n"
-            f"{proposal.get('explanation') or '(none)'}\n\n"
-            "UNIFIED DIFF\n"
-            "============\n"
-            f"{proposal.get('diff') or '(none)'}")
-        self.proposal_output.setPlainText(text)
-        self._update_doctor_controls()
-
-    def _on_repair_failed(self, message):
-        self._append_progress(f"\nRepair failed:\n{message}\n")
-        self._current_proposal = None
-        self._update_doctor_controls()
-
-    def _on_repair_cancelled(self):
-        self._append_progress("\nRepair cancelled; disposable copy removed.\n")
-        self._current_proposal = None
-        self._update_doctor_controls()
-
-    def _cancel_repair(self):
-        if self.repair_backend is not None:
-            self.repair_backend.cancel()
-
-    def _approve_proposal(self):
-        if self.repair_backend is None or self._current_proposal is None:
-            return
+        profile_dir = self._context_value("profile_dir", "")
+        plugin_dir = self._context_value("plugin_dir", "")
+        source_repo = self._context_value("source_repo", "")
+        python_executable = self._context_value(
+            "python_executable", config.python_executable())
+        cli_paths = {
+            "claude": config.detect_claude(),
+            "codex": config.detect_codex(),
+        }
+        logs = list(self._context_value("log_entries", []) or [])[-200:]
+        repair = dict(spec)
+        request_payload = {
+            "diagnostics_bundle": self._last_report.get("bundle") or "",
+            "log_ring_buffer": logs,
+            "user_description": self.error_description.toPlainText().strip(),
+            "repair": repair,
+            "cli_paths": cli_paths,
+            "plugin_paths": {
+                "installed_tree": str(plugin_dir),
+                "source_repo": str(source_repo),
+                "profile_dir": str(profile_dir),
+            },
+            "qgis": {
+                "executable_path": str(self._context_value(
+                    "qgis_executable_path", "")),
+                "project_path": str(self._context_value(
+                    "project_filename", "")),
+            },
+        }
         try:
-            workspace = self.repair_backend.take_current_for_approval()
+            request_path = write_doctor_request(profile_dir, request_payload)
+            recovery = ensure_recovery_entrypoint(
+                profile_dir, plugin_dir, python_executable, source_repo)
+            doctor_cli = os.path.join(str(plugin_dir), "doctor_cli.py")
+            command = [
+                str(python_executable), doctor_cli,
+                "--profile-dir", str(profile_dir),
+                "--plugin-dir", str(plugin_dir),
+                "--source-repo", str(source_repo),
+                "--request", str(request_path),
+            ]
+            pid = launch_detached(command, cwd=plugin_dir)
+            self.external_launch_status.setText(
+                f"External Doctor launched (PID {pid}). Handoff saved; "
+                f"recovery BAT ready at {os.path.basename(str(recovery))}.")
         except Exception as exc:
-            self._append_progress(
-                f"\nApply failed; pre-state restored: {type(exc).__name__}: {exc}\n")
-            return
-        self._current_proposal = None
-        self._append_progress("\nApplying approved diff and creating backupâ€¦\n")
-
-        def apply_workspace():
-            try:
-                return workspace.apply()
-            finally:
-                workspace.deny()
-
-        self._start_doctor_action("apply", apply_workspace)
-
-    def _deny_proposal(self):
-        if self.repair_backend is not None:
-            self.repair_backend.deny_current()
-        self._current_proposal = None
-        self.proposal_output.clear()
-        self._append_progress(
-            "\nDenied; disposable copy removed and real trees unchanged.\n")
+            self.external_launch_status.setText(
+                f"External Doctor launch failed: {type(exc).__name__}: {exc}")
         self._update_doctor_controls()
-
-    def _restore_backup(self):
-        if self.doctor_service is None or self.backup_list.currentItem() is None:
-            return
-        path = self.backup_list.currentItem().data(Qt.UserRole)
-        self._append_progress("\nRestoring and hash-verifying selected backupâ€¦\n")
-        self._start_doctor_action(
-            "restore", lambda: self.doctor_service.restore_backup(path))
-
-    def _start_doctor_action(self, kind, action):
-        if self._action_worker is not None and self._action_worker.isRunning():
-            return
-        self._action_kind = str(kind)
-        worker = DoctorActionWorker(action, self)
-        self._action_worker = worker
-        worker.completed.connect(self._on_doctor_action_completed)
-        worker.failed.connect(self._on_doctor_action_failed)
-        worker.finished.connect(self._on_doctor_action_finished)
-        worker.start()
-        self._update_doctor_controls()
-
-    def _on_doctor_action_completed(self, result):
-        if self._action_kind == "apply":
-            heading = "\nApproved and applied with backup:\n"
-        else:
-            heading = "\nBackup restored and hash-verified:\n"
-        self._append_progress(heading + json.dumps(result, indent=2) + "\n")
-        self.reload_btn.setEnabled(True)
-        self._refresh_backups()
-
-    def _on_doctor_action_failed(self, message):
-        if self._action_kind == "apply":
-            self._append_progress(
-                f"\nApply failed; pre-state restored: {message}\n")
-        else:
-            self._append_progress(f"\nRestore failed: {message}\n")
-
-    def _on_doctor_action_finished(self):
-        worker = self._action_worker
-        self._action_worker = None
-        self._action_kind = ""
-        if worker is not None:
-            worker.deleteLater()
-        self._update_doctor_controls()
-
-    def _reload_plugin(self):
-        callback = self.doctor_context.get("reload_plugin")
-        if callable(callback):
-            callback()
-            self.accept()
-        else:
-            self._append_progress(
-                "\nReload callback unavailable; restart QGIS to load changes.\n")
 
     def _long_operation_running(self):
-        return (self._repair_busy
-                or (self._diag_worker is not None
+        return bool(self._diag_worker is not None
                     and self._diag_worker.isRunning())
-                or (self._action_worker is not None
-                    and self._action_worker.isRunning()))
 
     def reject(self):
         if self._long_operation_running():
             self.tabs.setCurrentIndex(1)
-            self._append_progress(
-                "Finish diagnostics or use Cancel for the repair before closing.\n")
+            self.diag_output.appendPlainText(
+                "Finish diagnostics before closing Settings.\n")
             return
         super().reject()
 
     def closeEvent(self, event):
         if self._long_operation_running():
             self.tabs.setCurrentIndex(1)
-            self._append_progress(
-                "Finish diagnostics or use Cancel for the repair before closing.\n")
+            self.diag_output.appendPlainText(
+                "Finish diagnostics before closing Settings.\n")
             event.ignore()
             return
         super().closeEvent(event)
 
     def shutdown(self):
-        if self.repair_backend is not None:
-            self.repair_backend.shutdown()
+        pass

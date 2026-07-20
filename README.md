@@ -79,38 +79,41 @@ SHA-256 key derived from the project filename and unsaved projects use
 `unsaved.jsonl`. The **✚ New** button is the only normal action that deletes
 the current project's active history and resets its CLI session.
 
-### Doctor and repair backups
+### Doctor and external recovery
 
-Open **Settings → Doctor** to run non-AI health checks for both CLIs, Python,
-the live MCP bridge, Claude JSONL streaming, bundled agents/skills, history,
-byte-compilation, and the plugin's recent QGIS log ring. **Auto-repair failed
-checks** applies only the listed deterministic remedies (configuration/bridge,
-CLI-path, cache, corrupt-history, and stale-session repairs) and then reruns the
-full check set.
+Open **Settings → Doctor** to run live diagnostics and the existing
+deterministic, live-safe self-heal actions. AI repair is handed off to a
+**detached External Doctor** console. The handoff includes the redacted
+diagnostics bundle, recent QGent log ring, your error description, selected
+repair model/effort, and resolved plugin/QGIS paths.
 
-**Diagnose & propose fix** copies the installed plugin to a disposable TEMP
-directory, excluding `claude_runtime/mcp-config.json`, and runs the selected
-repair model there. The real installed and source trees are byte/metadata/Git-
-state guarded while the proposal runs and revalidated when **Approve** is
-clicked, so a stale reviewed diff is refused. QGent presents the model
-explanation and unified diff; only an explicit **Approve** copies reviewed files
-to both trees and creates a `doctor:` source commit. Apply and Restore run in
-workers so the dialog event loop remains responsive. The configured source
-checkout is
-`D:\11 QGIS Agent\qgis_chat_agent` when that directory is present. **Deny**
-removes the copy without changing either tree. Codex repair uses
-`workspace-write`, an explicit disposable working root, the Windows elevated
-restricted-token sandbox, and disabled `unified_exec`; adversarial canaries
-verify that the copy remains writable while installed, source, profile, and
-unrelated sibling paths cannot be read or written. It never uses
-`danger-full-access`.
+The External Doctor is stdlib-only and stays alive while QGIS closes or
+restarts. It copies the installed plugin to a disposable directory (always
+excluding `claude_runtime/mcp-config.json`), runs the selected repair model
+there, prints and saves a unified diff, and requires the exact typed answer
+`yes` before any apply. Before applying or restoring, it waits for **zero QGIS
+processes**; it never kills QGIS without a separate explicit `KILL QGIS`
+confirmation, and process-detection failures block changes. Handoff model and
+executable fields are treated as untrusted: the Doctor matches the shared model
+catalog and independently detects/authenticates the owning CLI. Approved changes
+receive a paired installed/source SHA-256 backup, two-tree hash and compile
+verification, and a `doctor:` source commit. Restore first creates a separate
+pre-restore rollback backup and automatically restores it if verification fails.
+Audit events are appended to `<QGIS profile>/qgent/doctor/doctor.log`.
 
-Approved changes are backed up under
-`<QGIS settings dir>/qgent/backups/<timestamp>/`. Each backup contains a paired
-installed/source pre-state manifest with SHA-256 hashes. **Restore selected
-backup** verifies the restored bytes, creates a `doctor: restore` source commit
-when the source checkout is present, and enables plugin reload. Applying or
-restoring source changes requires Git on the machine.
+#### Dead-plugin recovery
+
+If QGent won't load, run **`qgent-doctor.bat` from your QGIS profile folder**:
+
+```text
+<QGIS profile>/qgent/qgent-doctor.bat
+```
+
+QGent regenerates this launcher when missing. It starts
+`doctor_cli.py` in a new console using the recorded Python interpreter, with
+`py` and `python` fallbacks. With QGIS closed, use its numbered menu to
+diagnose, clear caches, quarantine corrupt history, re-detect CLI paths,
+prepare/review an AI repair, or restore a verified backup.
 
 ## Safety
 
@@ -135,10 +138,11 @@ is best-effort. **Claude Code is the reference backend.**
 
 ```
 qgis_chat_agent/
-├── metadata.txt, __init__.py, plugin.py, config.py, history.py, doctor.py
+├── metadata.txt, __init__.py, plugin.py, config.py, history.py
+├── doctor.py, doctor_core.py, doctor_cli.py, model_catalog.py
 ├── ui/            chat_dock.py, widgets.py, settings_dialog.py
 ├── agent/         backend_base.py, claude_code_backend.py, codex_backend.py,
-│                  repair_backend.py, stream_parser.py
+│                  stream_parser.py
 ├── bridge/        qgis_socket_server.py, main_thread_executor.py, safety.py, mcp_stdio_bridge.py
 ├── context/       project_snapshot.py
 ├── claude_runtime/          # CLI working directory (bundled)

@@ -12,6 +12,12 @@ import sys
 
 from qgis.PyQt.QtCore import QSettings
 
+from .model_catalog import (
+    CUSTOM_MODEL_SENTINEL, MODEL_CATALOG, MODEL_DEFAULTS,
+    MODEL_IDS_BY_BACKEND, MODEL_ROLES, accepted_model_ids, default_model,
+    model_ids, model_options, normalize_model_id, repair_model_specs,
+)
+
 GROUP = "QgisCopilot"
 
 # --- keys ------------------------------------------------------------------
@@ -40,8 +46,6 @@ K_MODEL_SETTINGS_VERSION = "model_settings_version"
 K_EXEC_TIMEOUT = "exec_timeout_s"
 K_REDUCE_MOTION = "reduce_motion"
 
-MODEL_ROLES = ("supervisor", "worker", "light")
-CUSTOM_MODEL_SENTINEL = "__qgent_custom_model__"
 MODEL_SETTINGS_VERSION = 2
 
 _MODEL_KEYS = {
@@ -93,74 +97,6 @@ DEFAULTS = {
     K_REDUCE_MOTION: False,
 }
 
-# Neither Claude Code 2.1.214 nor Codex CLI 0.144.1 exposes a headless model
-# enumeration command. This catalog is the single source for Settings, backend
-# validation, and Doctor repair choices. ``id`` is the one value shown/passed
-# for ordinary chat; ``aliases`` are recognized only for migration/validation.
-MODEL_CATALOG = {
-    "claude": (
-        {
-            "id": "sonnet",
-            "label": "Sonnet — balanced (default)",
-            "aliases": ("claude-sonnet-5",),
-        },
-        {
-            "id": "haiku",
-            "label": "Haiku — fastest, light tasks",
-            "aliases": ("claude-haiku-4-5-20251001",),
-        },
-        {
-            "id": "opus",
-            "label": "Opus 4.8 — most capable",
-            "aliases": ("claude-opus-4-8",),
-            "repair": {
-                "model": "claude-opus-4-8", "effort": "max",
-                "label": "Claude · Opus 4.8 · max",
-            },
-        },
-        {
-            "id": "fable",
-            "label": "Fable 5 — frontier",
-            "aliases": ("claude-fable-5",),
-            "repair": {
-                "model": "claude-fable-5", "effort": "max",
-                "label": "Claude · Fable 5 · max",
-            },
-        },
-    ),
-    "codex": (
-        {
-            "id": "gpt-5.6-sol",
-            "label": "GPT-5.6 Sol — most capable",
-            "aliases": (),
-            "repair": {
-                "model": "gpt-5.6-sol", "effort": "xhigh",
-                "label": "Codex · GPT-5.6 Sol · xhigh",
-            },
-        },
-        {
-            "id": "gpt-5.6-terra",
-            "label": "GPT-5.6 Terra — fast",
-            "aliases": (),
-        },
-    ),
-}
-
-MODEL_DEFAULTS = {
-    "claude": {"supervisor": "sonnet", "worker": "sonnet", "light": "haiku"},
-    "codex": {
-        "supervisor": "gpt-5.6-sol",
-        "worker": "gpt-5.6-sol",
-        "light": "gpt-5.6-sol",
-    },
-}
-
-# Compatibility for callers that need only the one-row-per-model IDs.
-MODEL_IDS_BY_BACKEND = {
-    backend: tuple(entry["id"] for entry in entries)
-    for backend, entries in MODEL_CATALOG.items()
-}
-
 _BOOL_KEYS = {
     K_VERIFIER, K_REDUCE_MOTION, *_MODEL_CUSTOM_KEYS.values(),
 }
@@ -192,55 +128,6 @@ def set(key, value):  # noqa: A001 (shadowing builtin is fine for a config modul
     s = _settings()
     s.setValue(key, value)
     s.endGroup()
-
-
-def model_ids(backend):
-    """Return exactly one selectable CLI id for each curated model."""
-    return MODEL_IDS_BY_BACKEND.get(str(backend or "").lower(), ())
-
-
-def model_options(backend):
-    """Return ``(friendly label, CLI id)`` rows for the selected backend."""
-    entries = MODEL_CATALOG.get(str(backend or "").lower(), ())
-    return tuple((entry["label"], entry["id"]) for entry in entries)
-
-
-def accepted_model_ids(backend):
-    """Return curated ids plus known full-id aliases, without duplicate rows."""
-    values = []
-    for entry in MODEL_CATALOG.get(str(backend or "").lower(), ()):
-        values.append(entry["id"])
-        values.extend(entry.get("aliases") or ())
-    return tuple(values)
-
-
-def normalize_model_id(backend, value):
-    """Map a known id/full-id alias to its single selectable CLI id."""
-    text = str(value or "").strip()
-    for entry in MODEL_CATALOG.get(str(backend or "").lower(), ()):
-        if text == entry["id"] or text in (entry.get("aliases") or ()):
-            return entry["id"]
-    return ""
-
-
-def default_model(backend, role="supervisor"):
-    backend = str(backend or "").lower()
-    role = str(role or "supervisor").lower()
-    return MODEL_DEFAULTS.get(backend, {}).get(role, "")
-
-
-def repair_model_specs():
-    """Build Doctor repair choices from the same catalog used by Settings."""
-    specs = []
-    for backend, entries in MODEL_CATALOG.items():
-        for entry in entries:
-            repair = entry.get("repair")
-            if repair:
-                item = dict(repair)
-                item["backend"] = backend
-                specs.append(item)
-    # Preserve Goal 5's deliberate order: Codex first, then Claude models.
-    return tuple(sorted(specs, key=lambda item: item["backend"] != "codex"))
 
 
 def _model_setting_key(backend, role, custom=False):

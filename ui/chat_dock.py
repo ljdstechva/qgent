@@ -530,27 +530,12 @@ class ChatDock(QDockWidget):
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(existing.rstrip() + "\n" + block)
 
-    def _regenerate_doctor_configs(self):
-        self._write_mcp_config(include_codex=True)
-
-    def _restart_bridge_for_doctor(self):
-        old_bridge = self.bridge
-        old_executor = self.executor
-        if old_bridge is not None:
-            old_bridge.stop()
-            try:
-                old_bridge.deleteLater()
-            except (AttributeError, RuntimeError):
-                pass
-        if old_executor is not None:
-            try:
-                old_executor.deleteLater()
-            except (AttributeError, RuntimeError):
-                pass
-        self.bridge = None
-        self.executor = None
-        self.token = secrets.token_hex(16)
-        self._start_bridge()
+    def _regenerate_codex_config_for_doctor(self):
+        """Repair only Codex state; the protected Claude MCP file is untouched."""
+        py = config.python_executable()
+        bridge_script = os.path.join(
+            self.plugin_dir, "bridge", "mcp_stdio_bridge.py")
+        self._write_codex_toml(py, bridge_script)
 
     def _repair_history_for_doctor(self):
         if self.history_store is None:
@@ -573,6 +558,11 @@ class ChatDock(QDockWidget):
             "codex_config_path": os.path.join(
                 os.path.expanduser("~"), ".codex", "config.toml"),
             "python_executable": config.python_executable,
+            "cli_paths": lambda: {
+                "claude": config.detect_claude(),
+                "codex": config.detect_codex(),
+            },
+            "qgis_executable_path": QCoreApplication.applicationFilePath,
             "bridge_env": self._bridge_env,
             "log_entries": lambda: list(self.diagnostic_logs),
             "last_cli_stderr": lambda: getattr(
@@ -583,23 +573,12 @@ class ChatDock(QDockWidget):
             if self.history_store is not None else "",
             "project_filename": lambda: QgsProject.instance().fileName(),
             "source_repo": str(DEFAULT_SOURCE_REPO),
-            "restart_bridge": self._restart_bridge_for_doctor,
-            "regenerate_configs": self._regenerate_doctor_configs,
+            "regenerate_codex_config": self._regenerate_codex_config_for_doctor,
             "repair_history": self._repair_history_for_doctor,
             "clear_session": self._clear_session_for_doctor,
             "chat_busy": lambda: bool(
                 self.backend is not None and self.backend.is_busy()),
-            "reload_plugin": self._reload_plugin_for_doctor,
         }
-
-    def _reload_plugin_for_doctor(self):
-        plugin_id = os.path.basename(os.path.normpath(self.plugin_dir))
-
-        def reload_now():
-            from qgis.utils import reloadPlugin
-            reloadPlugin(plugin_id)
-
-        QTimer.singleShot(0, reload_now)
 
     def _build_backend(self, preserve_session=True):
         previous_kind = self._backend_kind
