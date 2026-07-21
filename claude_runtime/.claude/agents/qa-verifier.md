@@ -26,6 +26,9 @@ Rules:
   granted tools. A supplied filesystem path is toolable through `stat_path`.
 - If the live project state contradicts the contract's stated PROJECT CONTEXT,
   report the contradiction rather than guessing.
+- You cannot call `ask_user`. If a required check is blocked by material
+  ambiguity, report the concrete ambiguity and 2–4 candidate choices to the
+  Supervisor; do not invent an answer or ask an open-ended question.
 
 Output format — exactly one line per DoD item:
 ```

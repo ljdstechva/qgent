@@ -190,6 +190,45 @@ QPushButton#QgentDeny {{
 }}
 QPushButton#QgentDeny:hover {{ color: {t.danger}; border-color: {t.danger}; }}
 
+/* ---- structured question card ---- */
+QFrame#QgentQuestion {{
+    background: {t.surface}; border: 1px solid {t.accent};
+    border-left: 3px solid {t.accent}; border-radius: 10px;
+}}
+QLabel#QgentQuestionHead {{
+    color: {t.accent}; background: transparent; font-weight: 700;
+}}
+QLabel#QgentQuestionText, QLabel#QgentQuestionAnswer {{
+    color: {t.text}; background: transparent;
+}}
+QLabel#QgentQuestionAnswer {{ color: {t.text_muted}; font-size: 10px; }}
+QPushButton#QgentQuestionOption {{
+    color: {t.text}; background: transparent; text-align: left;
+    border: 1px solid {t.accent}; border-radius: 7px; padding: 7px 10px;
+}}
+QPushButton#QgentQuestionOption:hover {{ background: {t.surface_hi}; }}
+QPushButton#QgentQuestionOption[chosen="true"] {{
+    color: #FFFFFF; background: {t.accent}; border-color: {t.accent};
+}}
+QPushButton#QgentQuestionOption[muted="true"] {{
+    color: {t.text_muted}; background: {t.chip_bg}; border-color: {t.border};
+}}
+QWidget#QgentQuestionOtherRow {{ background: transparent; }}
+QLineEdit#QgentQuestionOtherInput {{
+    color: {t.text}; background: {t.bg}; border: 1px solid {t.border};
+    border-radius: 7px; padding: 6px 8px;
+}}
+QLineEdit#QgentQuestionOtherInput:disabled {{
+    color: {t.text_muted}; background: {t.chip_bg}; border-color: {t.border};
+}}
+QPushButton#QgentQuestionSubmit {{
+    color: #FFFFFF; background: {t.accent}; border: none;
+    border-radius: 7px; padding: 6px 10px; font-weight: 600;
+}}
+QPushButton#QgentQuestionSubmit:disabled {{
+    color: {t.text_muted}; background: {t.surface_hi};
+}}
+
 /* ---- empty state ---- */
 #QgentHero QLabel {{ background: transparent; }}
 #QgentGreeting {{ color: {t.text}; font-size: 14px; font-weight: 600; }}
@@ -219,6 +258,7 @@ QToolButton#QgentQueueToggle:hover, QToolButton#QgentQueueRowButton:hover {{
 }}
 #QgentQueueTask[status="running"] {{ border-left: 3px solid {t.accent}; }}
 #QgentQueueTask[status="waiting_approval"] {{ border-left: 3px solid {t.warn}; }}
+#QgentQueueTask[status="waiting_question"] {{ border-left: 3px solid {t.accent2}; }}
 #QgentQueueTask[status="done"] {{ border-left: 3px solid {t.ok}; }}
 #QgentQueueTask[status="failed"] {{ border-left: 3px solid {t.danger}; }}
 #QgentQueueText {{ color: {t.text}; font-size: 10px; }}

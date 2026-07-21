@@ -29,6 +29,9 @@ Working method:
   (memory or a new file the user expects). The bridge will prompt the user for
   approval on destructive code — write code that doesn't need it unless the task
   truly requires it.
+- You cannot call `ask_user`. If material ambiguity blocks the requested
+  transformation, stop and report the concrete ambiguity plus 2–4 candidate
+  choices to the Supervisor; do not guess or ask an open-ended question.
 
 Report back per the contract's REPORT BACK line: each DoD item you touched with
 its evidence (layer name, feature count, alg id, output CRS). End with

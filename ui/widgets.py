@@ -7,6 +7,7 @@ Visual language (see theme.py):
   * tool calls      — pill chips with a live spinner → ✓/✕, expandable details
   * subagents       — shimmering chips with elapsed time
   * approvals       — amber cards that slide in and pulse for attention
+  * questions       — structured choices that freeze into durable answers
 
 Nothing here talks to the agent — the dock wires signals into these widgets.
 """
@@ -20,6 +21,7 @@ from qgis.PyQt.QtGui import QColor, QDesktopServices, QPixmap
 from qgis.PyQt.QtWidgets import (
     QFrame, QLabel, QVBoxLayout, QHBoxLayout, QToolButton, QTextBrowser,
     QPushButton, QPlainTextEdit, QWidget, QSizePolicy, QApplication,
+    QLineEdit,
 )
 
 from . import theme
@@ -477,6 +479,182 @@ class ApprovalCard(QFrame):
                 and not self.deny_btn.isVisible())
 
 
+# ===========================================================================
+# Structured clarifying question
+# ===========================================================================
+class QuestionCard(QFrame):
+    """Two-to-five concrete choices with an optional inline Other answer."""
+
+    answered = pyqtSignal(str, str)  # answer, answer_kind (option | other)
+
+    def __init__(self, question, options, allow_other, tokens, parent=None):
+        super().__init__(parent)
+        self.t = tokens
+        self.question = str(question or "").strip()
+        self.options = tuple(str(option or "").strip() for option in options)
+        self.allow_other = bool(allow_other)
+        self._terminal = False
+        self._outcome = "pending"
+        self._answer = ""
+        self._answer_kind = ""
+        self._option_buttons = {}
+        self.setObjectName("QgentQuestion")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(7)
+
+        self.head = QLabel("Clarification needed")
+        self.head.setObjectName("QgentQuestionHead")
+        layout.addWidget(self.head)
+        self.question_label = QLabel(self.question)
+        self.question_label.setObjectName("QgentQuestionText")
+        self.question_label.setTextFormat(Qt.PlainText)
+        self.question_label.setWordWrap(True)
+        layout.addWidget(self.question_label)
+
+        for option in self.options:
+            button = QPushButton(option)
+            button.setObjectName("QgentQuestionOption")
+            button.setProperty("chosen", "false")
+            button.setProperty("muted", "false")
+            button.setCursor(Qt.PointingHandCursor)
+            button.clicked.connect(
+                lambda _checked=False, value=option:
+                self._request_answer(value, "option"))
+            self._option_buttons[option] = button
+            layout.addWidget(button)
+
+        self.other_btn = None
+        self.other_row = None
+        self.other_input = None
+        self.other_submit = None
+        if self.allow_other:
+            self.other_btn = QPushButton("Other…")
+            self.other_btn.setObjectName("QgentQuestionOption")
+            self.other_btn.setProperty("chosen", "false")
+            self.other_btn.setProperty("muted", "false")
+            self.other_btn.setCursor(Qt.PointingHandCursor)
+            self.other_btn.clicked.connect(self._show_other)
+            layout.addWidget(self.other_btn)
+
+            self.other_row = QWidget()
+            self.other_row.setObjectName("QgentQuestionOtherRow")
+            row = QHBoxLayout(self.other_row)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(6)
+            self.other_input = QLineEdit()
+            self.other_input.setObjectName("QgentQuestionOtherInput")
+            self.other_input.setPlaceholderText("Type a short answer")
+            self.other_submit = QPushButton("Submit")
+            self.other_submit.setObjectName("QgentQuestionSubmit")
+            self.other_submit.setCursor(Qt.PointingHandCursor)
+            row.addWidget(self.other_input, 1)
+            row.addWidget(self.other_submit)
+            self.other_submit.clicked.connect(self._submit_other)
+            self.other_input.returnPressed.connect(self._submit_other)
+            self.other_row.hide()
+            layout.addWidget(self.other_row)
+
+        self.answer_note = QLabel("")
+        self.answer_note.setObjectName("QgentQuestionAnswer")
+        self.answer_note.setTextFormat(Qt.PlainText)
+        self.answer_note.setWordWrap(True)
+        self.answer_note.hide()
+        layout.addWidget(self.answer_note)
+
+    def _show_other(self):
+        if self._terminal or self.other_row is None:
+            return
+        self.other_row.show()
+        self.other_input.setFocus()
+
+    def _submit_other(self):
+        if self._terminal or self.other_input is None:
+            return
+        answer = self.other_input.text().strip()
+        if answer:
+            self._request_answer(answer, "other")
+
+    def _request_answer(self, answer, answer_kind):
+        if not self._terminal:
+            self.answered.emit(str(answer), str(answer_kind))
+
+    def set_answer(self, answer, answer_kind="option", restored=False):
+        self.set_terminal(
+            "answered", answer=answer, answer_kind=answer_kind,
+            restored=restored)
+
+    def set_timeout(self, restored=False):
+        self.set_terminal("timeout", restored=restored)
+
+    def set_cancelled(self, reason="Question cancelled", restored=False):
+        self.set_terminal("cancelled", reason=reason, restored=restored)
+
+    def set_pending_static(self, restored=True):
+        self.set_terminal("pending", restored=restored)
+
+    def set_terminal(self, outcome, answer="", answer_kind="", reason="",
+                     restored=False):
+        """Freeze the card into one inert terminal or restored state."""
+        outcome = str(outcome or "pending")
+        answer = str(answer or "")
+        answer_kind = str(answer_kind or "")
+        self._terminal = True
+        self._outcome = outcome
+        self._answer = answer
+        self._answer_kind = answer_kind
+
+        chosen = None
+        if outcome == "answered" and answer_kind == "option":
+            chosen = self._option_buttons.get(answer)
+        elif outcome == "answered" and answer_kind == "other":
+            chosen = self.other_btn
+
+        buttons = list(self._option_buttons.values())
+        if self.other_btn is not None:
+            buttons.append(self.other_btn)
+        for button in buttons:
+            button.setEnabled(False)
+            button.setProperty("chosen", "true" if button is chosen else "false")
+            button.setProperty("muted", "false" if button is chosen else "true")
+            theme.repolish(button)
+
+        if self.other_input is not None:
+            if outcome == "answered" and answer_kind == "other":
+                self.other_input.setText(answer)
+                self.other_input.setCursorPosition(0)
+                self.other_row.show()
+            self.other_input.setEnabled(False)
+            self.other_submit.setEnabled(False)
+
+        suffix = " · restored from chat history" if restored else ""
+        if outcome == "answered":
+            self.head.setText("Clarification answered")
+            self.answer_note.setText("Answer: " + answer + suffix)
+        elif outcome == "timeout":
+            self.head.setText("No answer received")
+            self.answer_note.setText(
+                "No answer — QGent will make the safest assumption" + suffix)
+        elif outcome == "cancelled":
+            self.head.setText("Question cancelled")
+            self.answer_note.setText(str(reason or "Question cancelled") + suffix)
+        else:
+            self.head.setText("Incomplete clarification")
+            self.answer_note.setText("No answer was recorded" + suffix)
+        self.answer_note.show()
+
+    def is_static_state(self):
+        return self._terminal and all(
+            not button.isEnabled() for button in self._option_buttons.values())
+
+    def outcome(self):
+        return self._outcome
+
+    def answer(self):
+        return self._answer
+
+
 class StatusNote(QLabel):
     """Subtle inert line for session fallback and restored status events."""
 
@@ -722,6 +900,7 @@ class QueueTaskRow(QFrame):
         "queued": ("\u23f8", "Queued"),
         "running": ("\u25b6", "Running"),
         "waiting_approval": ("\u26a0", "Waiting for approval"),
+        "waiting_question": ("?", "Waiting for answer"),
         "done": ("\u2713", "Done"),
         "failed": ("\u2715", "Failed"),
         "skipped": ("\u21aa", "Skipped"),
@@ -806,7 +985,8 @@ class QueueTaskRow(QFrame):
             self.tokens_label.setText("")
             self.tokens_label.setToolTip("")
         queued = status == "queued"
-        running = status in ("running", "waiting_approval")
+        running = status in (
+            "running", "waiting_approval", "waiting_question")
         self.up_btn.setVisible(queued)
         self.down_btn.setVisible(queued)
         self.remove_btn.setVisible(queued)

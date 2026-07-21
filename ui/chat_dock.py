@@ -44,7 +44,7 @@ from .animations import fade_in, smooth_scroll_to_bottom, staggered, ThinkingDot
 from .widgets import (
     MessageBubble, ToolChip, SubagentChip, ApprovalCard, ChatInput,
     SendStopButton, SuggestionChip, ContextStrip, StatusNote, QueuePanel,
-    SnapshotCard,
+    SnapshotCard, QuestionCard,
 )
 from .settings_dialog import SettingsDialog
 from ..bridge.qgis_socket_server import BridgeServer
@@ -217,8 +217,10 @@ class ChatDock(QDockWidget):
         self._last_tool_finished = True
         self._subagent_history = {}
         self._approval_history = {}
+        self._question_history = {}
         self._active_turn = None
         self._live_approvals = {}
+        self._live_questions = {}
         self._queue_tasks = []
         self._queue_running = False
         self._queue_pause_after_current = False
@@ -918,6 +920,7 @@ class ChatDock(QDockWidget):
         tool_widgets = {}
         subagent_widgets = {}
         approval_widgets = {}
+        question_widgets = {}
         self._history_replaying = True
         try:
             for index, record in enumerate(records):
@@ -980,6 +983,34 @@ class ChatDock(QDockWidget):
                     elif record.get("event") == "cancelled":
                         card.set_cancelled(
                             self._record_text(record, "reason", "Approval cancelled"))
+                elif kind == "question":
+                    question_id = str(
+                        record.get("question_id") or f"legacy-{index}")
+                    card = question_widgets.get(question_id)
+                    if card is None:
+                        card = QuestionCard(
+                            self._record_text(record, "question"),
+                            [str(option) for option in (
+                                record.get("options") or [])],
+                            bool(record.get("allow_other", True)), self.t)
+                        card.set_pending_static(restored=True)
+                        question_widgets[question_id] = card
+                        self._question_history[question_id] = card
+                        self._add_widget(card, animate=False)
+                    event = str(record.get("event") or "requested")
+                    if event == "answered":
+                        card.set_answer(
+                            self._record_text(record, "answer"),
+                            self._record_text(
+                                record, "answer_kind", "option"),
+                            restored=True)
+                    elif event == "timeout":
+                        card.set_timeout(restored=True)
+                    elif event == "cancelled":
+                        card.set_cancelled(
+                            self._record_text(
+                                record, "reason", "Question cancelled"),
+                            restored=True)
                 elif kind == "queue":
                     event = self._record_text(record, "event", "event")
                     task_text = " ".join(
@@ -1031,6 +1062,8 @@ class ChatDock(QDockWidget):
         self.bridge.execute_requested.connect(self.executor.handle)
         self.bridge.approval_requested.connect(self.on_approval_requested)
         self.bridge.approval_finished.connect(self._on_approval_finished)
+        self.bridge.question_requested.connect(self.on_question_requested)
+        self.bridge.question_finished.connect(self._on_question_finished)
         self.bridge.auto_approved.connect(self._on_auto_approved)
         self.bridge.activity.connect(self._on_bridge_activity)
         port = self.bridge.start()
@@ -1140,6 +1173,7 @@ class ChatDock(QDockWidget):
         previous_kind = self._backend_kind
         previous_session = None
         if self.backend is not None:
+            self._cancel_pending_questions("Backend replaced")
             self._cancel_pending_approvals("Backend replaced")
             previous_session = self.backend.session_id
             try:
@@ -1511,6 +1545,7 @@ class ChatDock(QDockWidget):
         task["status"] = str(status)
         task["error"] = str(error or "")
         if status in ("done", "failed", "skipped"):
+            task.pop("awaiting_question_id", None)
             started = task.get("started_at")
             if started is not None:
                 task["elapsed_s"] = round(
@@ -1549,6 +1584,7 @@ class ChatDock(QDockWidget):
                     queued, "skipped", "Skipped after a previous task failed.")
         if self.bridge is not None:
             self.bridge.clear_batch_permission_mode()
+        self._cancel_pending_questions("Queue stopped after an agent error")
         self._cancel_pending_approvals("Queue stopped after an agent error")
         self._history_append(
             "queue", event="batch_error_stop_requested",
@@ -1665,6 +1701,7 @@ class ChatDock(QDockWidget):
             return
         task = self._queue_task(task_id)
         self._mark_queue_task(task, "failed", "Stopped by user.")
+        self._cancel_pending_questions("Current queue task stopped")
         self._cancel_pending_approvals("Current queue task stopped")
         busy = bool(self.backend is not None and self.backend.is_busy())
         if busy:
@@ -1686,6 +1723,7 @@ class ChatDock(QDockWidget):
         self._history_append("queue", event="stop_all_requested")
         if self.bridge is not None:
             self.bridge.clear_batch_permission_mode()
+        self._cancel_pending_questions("Queue stopped")
         self._cancel_pending_approvals("Queue stopped")
         active_id = (self._active_turn or {}).get("queue_task_id")
         for task in self._queue_tasks:
@@ -1711,6 +1749,7 @@ class ChatDock(QDockWidget):
         if task_id:
             self._stop_queue_task(task_id)
             return
+        self._cancel_pending_questions("Turn stopped")
         if self.backend is not None and self.backend.is_busy():
             self._cancel_pending_approvals("Turn stopped")
             self._ignore_next_terminal = True
@@ -1723,6 +1762,7 @@ class ChatDock(QDockWidget):
         self._finish_perf()
 
     def new_session(self):
+        self._cancel_pending_questions("New session started")
         self._cancel_pending_approvals("New session started")
         if self.bridge is not None:
             self.bridge.clear_batch_permission_mode()
@@ -2131,6 +2171,134 @@ class ChatDock(QDockWidget):
             "approval", event="cancelled", approval_id=approval_id,
             reason=reason)
 
+    # ======================================================================
+    # Structured clarifying questions
+    # ======================================================================
+    def on_question_requested(self, payload):
+        """Render one bridge-owned question without answering it implicitly."""
+        self._end_stream()
+        question_id = str(payload.get("question_id") or "")
+        if (not question_id or question_id in self._live_questions
+                or str(payload.get("state") or "pending") != "pending"):
+            return
+        question = clipped_text(payload.get("question", ""), 300)
+        options = tuple(
+            clipped_text(option, 80) for option in (payload.get("options") or []))
+        allow_other = bool(payload.get("allow_other", True))
+        card = QuestionCard(question, options, allow_other, self.t)
+        task_id = (self._active_turn or {}).get("queue_task_id")
+        item = {
+            "card": card,
+            "question": question,
+            "options": options,
+            "allow_other": allow_other,
+            "task_id": task_id,
+            "bridge_payload": payload,
+        }
+        self._question_history[question_id] = card
+        self._live_questions[question_id] = item
+        self._history_append(
+            "question", event="requested", question_id=question_id,
+            question=question, options=list(options),
+            allow_other=allow_other)
+
+        task = self._queue_task(task_id) if task_id else None
+        if (self._queue_running and task is not None
+                and task.get("status") == "running"):
+            task["status"] = "waiting_question"
+            task["awaiting_question_id"] = question_id
+            self._history_append(
+                "queue", event="awaiting_question", task_id=task_id,
+                question_id=question_id, question=question)
+            self._sync_queue_panel()
+            self._notify_batch_attention(
+                "question", "QGent is asking a question")
+
+        def answer(value, answer_kind):
+            bridge = self.bridge
+            if bridge is None:
+                return
+            try:
+                accepted = bridge.resolve_question(
+                    question_id, "answered", answer=value)
+            except (TypeError, ValueError):
+                accepted = False
+            if accepted:
+                self._finalize_question(
+                    question_id, "answered", answer=value,
+                    answer_kind=answer_kind)
+
+        card.answered.connect(answer)
+        self._add_widget(card)
+
+    def _finalize_question(self, question_id, outcome, answer="",
+                           answer_kind="", reason="", resume_queue=True):
+        """Finalize once and resume a queue only when every identity matches."""
+        question_id = str(question_id or "")
+        item = self._live_questions.pop(question_id, None)
+        if item is None:
+            return False
+        outcome = str(outcome or "cancelled")
+        answer = str(answer or "")
+        answer_kind = str(answer_kind or "")
+        if outcome == "answered" and answer_kind not in ("option", "other"):
+            answer_kind = (
+                "option" if answer in item["options"] else "other")
+        reason = str(reason or "")
+        card = item.get("card")
+        if card is not None:
+            card.set_terminal(
+                outcome, answer=answer, answer_kind=answer_kind,
+                reason=reason)
+
+        self._history_append(
+            "question", event=outcome, question_id=question_id,
+            question=item["question"], options=list(item["options"]),
+            allow_other=item["allow_other"], answer=answer,
+            answer_kind=answer_kind, reason=reason)
+
+        task_id = item.get("task_id")
+        task = self._queue_task(task_id) if task_id else None
+        turn_task_id = (self._active_turn or {}).get("queue_task_id")
+        identity_matches = bool(
+            task is not None
+            and task.get("awaiting_question_id") == question_id
+            and task.get("status") == "waiting_question"
+            and turn_task_id == task_id)
+        if identity_matches:
+            task.pop("awaiting_question_id", None)
+            if (resume_queue and outcome in ("answered", "timeout")
+                    and self._queue_running):
+                task["status"] = "running"
+            self._sync_queue_panel()
+        return True
+
+    def _cancel_pending_questions(self, reason):
+        """Cancel through the bridge, then freeze only transitions we won."""
+        resolved = ()
+        if self.bridge is not None:
+            resolved = self.bridge.cancel_pending_questions(str(reason))
+        for question_id, item in list(self._live_questions.items()):
+            payload = item.get("bridge_payload") or {}
+            outcome = str(payload.get("state") or "cancelled")
+            if outcome not in ("answered", "timeout", "cancelled"):
+                outcome = "cancelled"
+            terminal_reason = str(payload.get("reason") or "")
+            if outcome == "cancelled" and not terminal_reason:
+                terminal_reason = str(reason)
+            self._finalize_question(
+                question_id, outcome,
+                answer=str(payload.get("answer") or ""),
+                reason=terminal_reason, resume_queue=False)
+        return tuple(resolved or ())
+
+    def _on_question_finished(self, payload):
+        question_id = str(payload.get("question_id") or "")
+        self._finalize_question(
+            question_id, str(payload.get("outcome") or "cancelled"),
+            answer=str(payload.get("answer") or ""),
+            reason=str(payload.get("reason") or ""))
+
     def _on_auto_approved(self, payload):
         if not (self._queue_running and payload.get("batch_scoped")):
             return
@@ -2260,6 +2428,8 @@ class ChatDock(QDockWidget):
         self._subagent_history.clear()
         self._approval_history.clear()
         self._live_approvals.clear()
+        self._question_history.clear()
+        self._live_questions.clear()
         self._stream_buf = ""
 
     # ======================================================================
@@ -2312,6 +2482,7 @@ class ChatDock(QDockWidget):
     # Teardown
     # ======================================================================
     def shutdown(self):
+        self._cancel_pending_questions("QGent closed")
         self._cancel_pending_approvals("QGent closed")
         if self.bridge is not None:
             self.bridge.clear_batch_permission_mode()

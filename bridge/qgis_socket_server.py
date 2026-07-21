@@ -28,12 +28,15 @@ from .. import config
 from . import safety
 
 _APPROVAL_TIMEOUT_S = 300
+_QUESTION_TIMEOUT_S = 15 * 60
 
 
 class BridgeServer(QObject):
     execute_requested = pyqtSignal(object)   # -> MainThreadExecutor.handle
     approval_requested = pyqtSignal(object)  # -> ChatDock.on_approval_requested
     approval_finished = pyqtSignal(object)   # closes timed-out/cancelled cards
+    question_requested = pyqtSignal(object)  # -> ChatDock.on_question_requested
+    question_finished = pyqtSignal(object)   # one terminal question outcome
     auto_approved = pyqtSignal(object)       # destructive batch operation metadata
     activity = pyqtSignal(str)               # tool name, for the status line
 
@@ -48,6 +51,8 @@ class BridgeServer(QObject):
         self._batch_permission_mode = None
         self._pending_approvals = {}
         self._approval_sequence = 0
+        self._pending_questions = {}
+        self._question_sequence = 0
 
     # -- lifecycle ----------------------------------------------------------
     def start(self):
@@ -60,6 +65,7 @@ class BridgeServer(QObject):
         return self.port
 
     def stop(self):
+        self.cancel_pending_questions("QGent bridge stopped")
         self.cancel_pending_approvals("QGent bridge stopped")
         self.clear_batch_permission_mode()
         if self._server is not None:
@@ -104,6 +110,43 @@ class BridgeServer(QObject):
                 approval["event"].set()
         return len(pending)
 
+    # -- structured user questions ----------------------------------------
+    def resolve_question(self, question_id, outcome, answer="", reason=""):
+        """Atomically resolve one pending question; return whether this won.
+
+        Answer, timeout, and cancellation all pass through this method so a
+        late GUI click can never overwrite the outcome selected by another
+        thread.  The GUI deliberately receives no mutable authority over the
+        bridge payload or its event.
+        """
+        outcome = str(outcome or "")
+        if outcome not in ("answered", "timeout", "cancelled"):
+            raise ValueError(f"Unsupported question outcome: {outcome!r}")
+        answer = str(answer or "").strip()
+        reason = str(reason or "")
+        if outcome == "answered" and not answer:
+            raise ValueError("A question answer cannot be empty.")
+        with self._gate_lock:
+            question = self._pending_questions.get(str(question_id or ""))
+            if question is None or question.get("state") != "pending":
+                return False
+            question["state"] = outcome
+            question["answer"] = answer if outcome == "answered" else ""
+            question["reason"] = reason
+            question["event"].set()
+            return True
+
+    def cancel_pending_questions(self, reason="operation cancelled"):
+        """Cancel every question still pending and release its handler."""
+        with self._gate_lock:
+            question_ids = tuple(self._pending_questions)
+        resolved = []
+        for question_id in question_ids:
+            if self.resolve_question(
+                    question_id, "cancelled", reason=str(reason)):
+                resolved.append(question_id)
+        return tuple(resolved)
+
     # -- request handling (runs in a handler thread) ------------------------
     def check_token(self, token):
         return bool(self._token) and token == self._token
@@ -111,6 +154,13 @@ class BridgeServer(QObject):
     def process(self, tool, args):
         """Return (ok: bool, payload_str: str). Blocks the handler thread only."""
         self.activity.emit(tool)
+
+        if tool == "ask_user":
+            try:
+                question, options, allow_other = self._validate_question_args(args)
+            except (TypeError, ValueError) as exc:
+                return False, "INVALID QUESTION: " + str(exc)
+            return True, self._ask_user(question, options, allow_other)
 
         if tool == "execute_pyqgis":
             denied = self._maybe_gate(args.get("code", ""))
@@ -128,6 +178,97 @@ class BridgeServer(QObject):
         if payload["error"]:
             return False, payload["error"]
         return True, payload["result"] if payload["result"] is not None else ""
+
+    @staticmethod
+    def _validate_question_args(args):
+        if not isinstance(args, dict):
+            raise TypeError("arguments must be an object.")
+        raw_question = args.get("question")
+        if not isinstance(raw_question, str):
+            raise TypeError("question must be a string.")
+        question = raw_question.strip()
+        if not question:
+            raise ValueError("question cannot be empty.")
+        if len(question) > 300:
+            raise ValueError("question must be at most 300 characters.")
+        raw_options = args.get("options")
+        if not isinstance(raw_options, list):
+            raise TypeError("options must be an array.")
+        if not 2 <= len(raw_options) <= 5:
+            raise ValueError("options must contain between 2 and 5 choices.")
+        options = []
+        for index, raw_option in enumerate(raw_options, 1):
+            if not isinstance(raw_option, str):
+                raise TypeError(f"option {index} must be a string.")
+            option = raw_option.strip()
+            if not option:
+                raise ValueError(f"option {index} cannot be empty.")
+            if len(option) > 80:
+                raise ValueError(
+                    f"option {index} must be at most 80 characters.")
+            options.append(option)
+        allow_other = args.get("allow_other", True)
+        if not isinstance(allow_other, bool):
+            raise TypeError("allow_other must be a boolean.")
+        return question, tuple(options), allow_other
+
+    def _ask_user(self, question, options, allow_other):
+        """Emit one structured question and block only this handler thread."""
+        with self._gate_lock:
+            self._question_sequence += 1
+            question_id = (
+                f"question-{str(self._token)[:8]}-{self._question_sequence}")
+            payload = {
+                "question_id": question_id,
+                "question": str(question),
+                "options": tuple(options),
+                "allow_other": bool(allow_other),
+                "event": threading.Event(),
+                "state": "pending",
+                "answer": "",
+                "reason": "",
+            }
+            self._pending_questions[question_id] = payload
+        self.question_requested.emit(payload)
+        terminal = None
+        try:
+            if not payload["event"].wait(timeout=_QUESTION_TIMEOUT_S):
+                self.resolve_question(
+                    question_id, "timeout",
+                    reason="the user did not respond")
+            with self._gate_lock:
+                terminal = {
+                    "question_id": question_id,
+                    "question": payload["question"],
+                    "options": tuple(payload["options"]),
+                    "allow_other": payload["allow_other"],
+                    "outcome": payload["state"],
+                    "answer": payload["answer"],
+                    "reason": payload["reason"],
+                }
+            if terminal["outcome"] == "answered":
+                return "USER ANSWERED: " + terminal["answer"]
+            if terminal["outcome"] == "timeout":
+                return (
+                    "NO ANSWER: the user did not respond — make the safest "
+                    "assumption and state it in your report.")
+            return "CANCELLED"
+        finally:
+            with self._gate_lock:
+                current = self._pending_questions.get(question_id)
+                if current is payload:
+                    self._pending_questions.pop(question_id, None)
+                if terminal is None:
+                    terminal = {
+                        "question_id": question_id,
+                        "question": payload["question"],
+                        "options": tuple(payload["options"]),
+                        "allow_other": payload["allow_other"],
+                        "outcome": payload["state"],
+                        "answer": payload["answer"],
+                        "reason": payload["reason"],
+                    }
+            self.question_finished.emit(terminal)
 
     def _maybe_gate(self, code):
         """Return a denial string if the user rejects, else None to proceed."""

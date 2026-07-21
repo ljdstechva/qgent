@@ -26,6 +26,7 @@ _ALLOWED_TOOLS = ",".join([
     "mcp__qgis__get_layer_features",
     "mcp__qgis__render_map_snapshot",
     "mcp__qgis__stat_path",
+    "mcp__qgis__ask_user",
     "Task", "TodoWrite", "Read", "Glob", "Grep",
 ])
 _DISALLOWED_TOOLS = ",".join([

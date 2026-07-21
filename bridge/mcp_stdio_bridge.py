@@ -22,8 +22,9 @@ SERVER_NAME = "qgis"
 HOST = os.environ.get("QGIS_COPILOT_HOST", "127.0.0.1")
 PORT = int(os.environ.get("QGIS_COPILOT_PORT", "0"))
 TOKEN = os.environ.get("QGIS_COPILOT_TOKEN", "")
+_QUESTION_SOCKET_TIMEOUT_S = 15 * 60 + 30
 
-# --- tool catalogue (must match bridge/main_thread_executor.py) ------------
+# --- tool catalogue (executor tools plus bridge-owned ask_user) ------------
 TOOLS = [
     {
         "name": "execute_pyqgis",
@@ -118,6 +119,44 @@ TOOLS = [
             "required": ["path"],
         },
     },
+    {
+        "name": "ask_user",
+        "description": (
+            "Ask one structured clarifying question only when unresolved "
+            "ambiguity would materially change the GIS outcome or safety. "
+            "Do not use this for minor preferences covered by stated defaults; "
+            "offer concrete choices instead of an open-ended question. For "
+            "a choice between project layers, always set allow_other=true."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 300,
+                    "description": "A concise, outcome-changing question.",
+                },
+                "options": {
+                    "type": "array",
+                    "minItems": 2,
+                    "maxItems": 5,
+                    "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 80,
+                    },
+                    "description": "Two to five concrete choices.",
+                },
+                "allow_other": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "Allow a short custom answer.",
+                },
+            },
+            "required": ["question", "options"],
+        },
+    },
 ]
 
 
@@ -125,8 +164,9 @@ TOOLS = [
 def call_qgis(tool, args):
     """Send one request to the in-QGIS socket server; return (ok, text)."""
     req = json.dumps({"token": TOKEN, "tool": tool, "args": args}) + "\n"
+    timeout = _QUESTION_SOCKET_TIMEOUT_S if tool == "ask_user" else 180
     try:
-        with socket.create_connection((HOST, PORT), timeout=180) as sock:
+        with socket.create_connection((HOST, PORT), timeout=timeout) as sock:
             sock.sendall(req.encode("utf-8"))
             buf = b""
             while b"\n" not in buf:

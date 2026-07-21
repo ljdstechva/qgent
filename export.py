@@ -101,6 +101,7 @@ def render_markdown(records, metadata, exported_at=None, in_progress=False):
 
     tool_finishes = {}
     approval_decisions = {}
+    question_records = {}
     for index, record in enumerate(records):
         if record.get("kind") == "tool" and record.get("event") == "finished":
             tool_finishes[str(record.get("tool_id") or "legacy-{}".format(index))] = record
@@ -109,9 +110,19 @@ def render_markdown(records, metadata, exported_at=None, in_progress=False):
             approval_decisions[
                 str(record.get("approval_id") or "legacy-{}".format(index))
             ] = record
+        if record.get("kind") == "question":
+            question_id = str(
+                record.get("question_id") or "legacy-{}".format(index))
+            state = question_records.setdefault(
+                question_id, {"source": None, "terminal": None})
+            if state["source"] is None or record.get("event") == "requested":
+                state["source"] = record
+            if record.get("event") in ("answered", "timeout", "cancelled"):
+                state["terminal"] = record
 
     rendered_tools = set()
     rendered_approvals = set()
+    rendered_questions = set()
     for index, record in enumerate(records):
         kind = str(record.get("kind") or "")
         stamp = _clock(record.get("t"))
@@ -178,6 +189,17 @@ def render_markdown(records, metadata, exported_at=None, in_progress=False):
             lines.extend(_approval_block(outcome, stamp, reasons, code))
             lines.extend(["", "---", ""])
             rendered_approvals.add(approval_id)
+        elif kind == "question":
+            question_id = str(
+                record.get("question_id") or "legacy-{}".format(index))
+            if question_id in rendered_questions:
+                continue
+            state = question_records.get(question_id) or {}
+            source = state.get("source") or record
+            terminal = state.get("terminal")
+            lines.extend(_question_block(source, terminal, stamp))
+            lines.extend(["", "---", ""])
+            rendered_questions.add(question_id)
         elif kind == "queue":
             lines.extend(_queue_event_block(record, stamp))
             lines.extend(["", "---", ""])
@@ -348,6 +370,46 @@ def _approval_block(outcome, stamp, reasons, code):
         lines.append("> - (none recorded)")
     lines.extend([">", "> **Code**", ">"])
     lines.extend(_quote_fence(_stored_text(code), "python"))
+    return lines
+
+
+def _question_block(source, terminal, stamp):
+    """Render one logical structured question from request + terminal rows."""
+    source = dict(source or {})
+    terminal = dict(terminal or {}) if terminal else None
+    event = str((terminal or source).get("event") or "requested")
+    labels = {
+        "answered": "Answered",
+        "timeout": "No answer",
+        "cancelled": "Cancelled",
+        "requested": "Pending",
+    }
+    lines = [
+        "> **Clarification - {} - {}**".format(
+            labels.get(event, event.title()), stamp),
+        ">",
+        *_quote_lines(_stored_text(source.get("question", ""))),
+        ">",
+        "> **Choices**",
+    ]
+    options = source.get("options") or []
+    if options:
+        lines.extend("> - " + _one_line(option) for option in options)
+    else:
+        lines.append("> - (none recorded)")
+    if source.get("allow_other", True):
+        lines.append("> - Other…")
+    lines.extend([">", "> **Outcome**"])
+    if event == "answered":
+        lines.extend(_quote_lines(
+            "Answer: " + _stored_text(terminal.get("answer", ""))))
+    elif event == "timeout":
+        lines.append("> No answer — use the safest stated assumption.")
+    elif event == "cancelled":
+        reason = _one_line(terminal.get("reason")) or "Question cancelled."
+        lines.append("> " + reason)
+    else:
+        lines.append("> Pending — no answer was recorded.")
     return lines
 
 
