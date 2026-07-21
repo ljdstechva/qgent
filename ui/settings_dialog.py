@@ -171,6 +171,8 @@ class SettingsDialog(QDialog):
 
         ga = QGroupBox("Appearance")
         aform = QFormLayout(ga)
+        self.show_map_snapshots = QCheckBox("Show map snapshots in chat")
+        aform.addRow("Maps", self.show_map_snapshots)
         self.reduce_motion = QCheckBox("Reduce motion (disable animations)")
         aform.addRow("Motion", self.reduce_motion)
         outer.addWidget(ga)
@@ -478,6 +480,8 @@ class SettingsDialog(QDialog):
         self.verifier.setChecked(config.get(config.K_VERIFIER))
         self.timeout.setValue(config.get(config.K_EXEC_TIMEOUT))
         self.max_result.setValue(config.get(config.K_MAX_RESULT))
+        self.show_map_snapshots.setChecked(
+            config.get(config.K_SHOW_MAP_SNAPSHOTS))
         self.reduce_motion.setChecked(config.get(config.K_REDUCE_MOTION))
 
     def _save_and_accept(self):
@@ -516,6 +520,9 @@ class SettingsDialog(QDialog):
         config.set(config.K_VERIFIER, self.verifier.isChecked())
         config.set(config.K_EXEC_TIMEOUT, self.timeout.value())
         config.set(config.K_MAX_RESULT, self.max_result.value())
+        config.set(
+            config.K_SHOW_MAP_SNAPSHOTS,
+            self.show_map_snapshots.isChecked())
         config.set(config.K_REDUCE_MOTION, self.reduce_motion.isChecked())
         self.accept()
 

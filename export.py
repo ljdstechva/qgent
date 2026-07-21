@@ -186,6 +186,23 @@ def render_markdown(records, metadata, exported_at=None, in_progress=False):
                 "**QGent batch summary** - {}".format(stamp), "",
                 _stored_text(record.get("text", "")), "", "---", "",
             ])
+        elif kind == "snapshot":
+            caption = str(
+                record.get("caption") or "Map after this step — {}".format(stamp))
+            snapshot_path = str(record.get("path") or "").strip()
+            if snapshot_path and Path(snapshot_path).is_file():
+                lines.extend([
+                    "![{}]({})".format(
+                        _markdown_alt(caption),
+                        Path(snapshot_path).resolve().as_uri()),
+                    "", "*{}*".format(_inline(caption)),
+                    "", "---", "",
+                ])
+            else:
+                lines.extend([
+                    "**{}**".format(_inline(caption)), "",
+                    "*Map snapshot unavailable.*", "", "---", "",
+                ])
         else:
             lines.extend([
                 "> **Info: {} - {}**".format(_inline(kind or "record"), stamp),
@@ -215,9 +232,9 @@ def write_markdown(path, markdown):
 
 def write_pdf(path, markdown, title="QGent Chat Export"):
     """Render Markdown to an A4 PDF with Qt only and return its absolute path."""
-    from qgis.PyQt.QtCore import QMarginsF, QSizeF
+    from qgis.PyQt.QtCore import QMarginsF, QSizeF, Qt, QUrl
     from qgis.PyQt.QtGui import (
-        QFont, QFontDatabase, QPageLayout, QPageSize, QPdfWriter,
+        QFont, QFontDatabase, QImage, QPageLayout, QPageSize, QPdfWriter,
         QTextDocument,
     )
 
@@ -266,9 +283,21 @@ def write_pdf(path, markdown, title="QGent Chat Export"):
             "table { border-collapse: collapse; } "
             "th, td { padding: 3px 6px; }"
         )
-        document.setMarkdown(str(markdown))
         paint_rect = writer.pageLayout().paintRectPixels(writer.resolution())
         document.setPageSize(QSizeF(paint_rect.width(), paint_rect.height()))
+        max_image_width = max(1, int(paint_rect.width()) - 32)
+        for source in _markdown_image_sources(markdown):
+            url = QUrl(source)
+            local_path = url.toLocalFile()
+            image = QImage(local_path) if local_path else QImage()
+            if image.isNull():
+                continue
+            if image.width() > max_image_width:
+                image = image.scaledToWidth(
+                    max_image_width, Qt.SmoothTransformation)
+            document.addResource(
+                QTextDocument.ImageResource, url, image)
+        document.setMarkdown(str(markdown))
         document.print_(writer)
         del writer
         if not os.path.isfile(temporary) or os.path.getsize(temporary) == 0:
@@ -398,6 +427,23 @@ def _one_line(value):
 
 def _inline(value):
     return html.escape(str(value), quote=False).replace("`", "\\`")
+
+
+def _markdown_alt(value):
+    return str(value).replace("\\", "\\\\").replace("[", "\\[").replace(
+        "]", "\\]")
+
+
+def _markdown_image_sources(markdown):
+    """Return unique local-image URIs in first-use order."""
+    found = []
+    seen = set()
+    for match in re.finditer(r"!\[[^\]]*\]\((file:[^)]+)\)", str(markdown)):
+        source = match.group(1)
+        if source not in seen:
+            seen.add(source)
+            found.append(source)
+    return found
 
 
 def _table(value):

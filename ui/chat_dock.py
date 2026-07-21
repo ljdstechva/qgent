@@ -16,15 +16,18 @@ load-bearing for benchmark comparability — do not restructure it.
 """
 import csv
 import datetime
+import hashlib
 import json
 import os
+import re
 import secrets
+import shutil
 import time
 
 from qgis.PyQt.QtCore import (
     Qt, QTimer, QCoreApplication, QSettings, QStandardPaths,
 )
-from qgis.PyQt.QtGui import QIcon
+from qgis.PyQt.QtGui import QIcon, QImage
 from qgis.PyQt.QtWidgets import (
     QDockWidget, QWidget, QVBoxLayout, QHBoxLayout, QScrollArea, QLabel,
     QToolButton, QFrame, QMenu, QFileDialog, QMessageBox, QApplication,
@@ -41,6 +44,7 @@ from .animations import fade_in, smooth_scroll_to_bottom, staggered, ThinkingDot
 from .widgets import (
     MessageBubble, ToolChip, SubagentChip, ApprovalCard, ChatInput,
     SendStopButton, SuggestionChip, ContextStrip, StatusNote, QueuePanel,
+    SnapshotCard,
 )
 from .settings_dialog import SettingsDialog
 from ..bridge.qgis_socket_server import BridgeServer
@@ -78,6 +82,61 @@ _ATTACHMENT_KINDS = {
     ".qml": "QGIS layer style",
     ".qpt": "QGIS print layout template",
 }
+
+_VISUAL_CHANGE_TOOLS = {"execute_pyqgis", "run_processing"}
+_SNAPSHOT_TOOL = "render_map_snapshot"
+_SNAPSHOT_MAX_EDGE = 640
+
+
+def _canonical_qgis_tool_name(name):
+    """Return a known QGIS tool's terminal name across backend spellings."""
+    text = str(name or "").strip()
+    for known in (*sorted(_VISUAL_CHANGE_TOOLS), _SNAPSHOT_TOOL):
+        if text == known or any(text.endswith(separator + known) for separator in (
+                "__", ".", "/", ":")):
+            return known
+    return ""
+
+
+def _snapshot_path_from_result(value):
+    """Extract the bridge's local PNG path from a textual tool result."""
+    if isinstance(value, dict):
+        candidate = value.get("snapshot_path")
+        return str(candidate or "").strip() if isinstance(candidate, str) else ""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        decoded = json.loads(text)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        decoded = None
+    if isinstance(decoded, dict):
+        candidate = decoded.get("snapshot_path")
+        if isinstance(candidate, str):
+            return candidate.strip()
+    match = re.search(
+        r'"snapshot_path"\s*:\s*("(?:\\.|[^"\\])*")', text)
+    if match:
+        try:
+            candidate = json.loads(match.group(1))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            candidate = ""
+        return str(candidate or "").strip()
+    return ""
+
+
+def _snapshot_file_fingerprint(path):
+    """Identify one rendered temp-file instance without trusting tool IDs."""
+    full_path = os.path.abspath(os.path.realpath(os.path.normpath(str(path))))
+    stat_result = os.stat(full_path)
+    digest = hashlib.sha256()
+    with open(full_path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return (
+        os.path.normcase(full_path), int(stat_result.st_size),
+        int(stat_result.st_mtime_ns), digest.hexdigest().upper(),
+    )
 
 
 def _attachment_descriptor(path):
@@ -718,6 +777,127 @@ class ChatDock(QDockWidget):
             return str(value.get("preview") or default)
         return str(value if value is not None else default)
 
+    @staticmethod
+    def _snapshots_enabled():
+        try:
+            return bool(config.get(config.K_SHOW_MAP_SNAPSHOTS))
+        except Exception:
+            return True
+
+    def _snapshot_directory(self, create=False):
+        if self.history_store is None:
+            return ""
+        path = os.path.join(str(self.history_store.history_dir), "snaps")
+        if create:
+            os.makedirs(path, exist_ok=True)
+        return path
+
+    @staticmethod
+    def _snapshot_caption():
+        return "Map after this step — " + datetime.datetime.now().strftime("%H:%M")
+
+    def _add_snapshot_card(self, path, caption, persist=True, animate=True):
+        card = SnapshotCard(path, caption, self.t)
+        self._add_widget(card, animate=animate)
+        card.show()
+        if persist:
+            self._history_append(
+                "snapshot", path=os.path.abspath(str(path)),
+                caption=str(caption))
+        return card
+
+    def _record_explicit_snapshot(self, result):
+        """Copy one first-seen render_map_snapshot result into history."""
+        turn = self._active_turn
+        if turn is None or not self._snapshots_enabled():
+            return None
+        source = _snapshot_path_from_result(result)
+        if not source:
+            return None
+        temporary = ""
+        try:
+            fingerprint = _snapshot_file_fingerprint(source)
+            seen = turn.setdefault("explicit_snapshot_fingerprints", set())
+            if fingerprint in seen:
+                return None
+            source_path = fingerprint[0]
+            image = QImage(source_path)
+            if image.isNull():
+                raise ValueError("render_map_snapshot returned an unreadable PNG")
+            directory = self._snapshot_directory(create=True)
+            if not directory:
+                return None
+            sequence = int(turn.get("explicit_snapshot_sequence") or 0) + 1
+            target = os.path.join(
+                directory, f"{turn['id']}-render-{sequence}.png")
+            temporary = target + ".tmp-" + secrets.token_hex(6)
+            shutil.copyfile(source_path, temporary)
+            copied = _snapshot_file_fingerprint(temporary)
+            if copied[1] != fingerprint[1] or copied[3] != fingerprint[3]:
+                raise OSError("snapshot copy verification failed")
+            os.replace(temporary, target)
+            temporary = ""
+            seen.add(fingerprint)
+            turn["explicit_snapshot_sequence"] = sequence
+            return self._add_snapshot_card(
+                target, self._snapshot_caption())
+        except Exception as exc:
+            self._log_history_warning(
+                "Map snapshot copy failed: {}: {}".format(
+                    type(exc).__name__, exc))
+            return None
+        finally:
+            if temporary:
+                try:
+                    os.unlink(temporary)
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    pass
+
+    def _capture_terminal_snapshot(self, turn):
+        """Capture at most once at a true terminal boundary for one turn."""
+        if turn is None or turn.get("terminal_snapshot_attempted"):
+            return None
+        turn["terminal_snapshot_attempted"] = True
+        if (not turn.get("visual_change_tool_ran")
+                or not self._snapshots_enabled()):
+            return None
+        temporary = ""
+        try:
+            directory = self._snapshot_directory(create=True)
+            if not directory:
+                return None
+            canvas = self.iface.mapCanvas()
+            image = canvas.grab().toImage()
+            if image.isNull():
+                raise ValueError("QGIS canvas grab returned an empty image")
+            if max(image.width(), image.height()) > _SNAPSHOT_MAX_EDGE:
+                image = image.scaled(
+                    _SNAPSHOT_MAX_EDGE, _SNAPSHOT_MAX_EDGE,
+                    Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            target = os.path.join(directory, f"{turn['id']}.png")
+            temporary = target + ".tmp-" + secrets.token_hex(6)
+            if not image.save(temporary, "PNG"):
+                raise OSError("Qt could not encode the canvas as PNG")
+            os.replace(temporary, target)
+            temporary = ""
+            return self._add_snapshot_card(
+                target, self._snapshot_caption())
+        except Exception as exc:
+            self._log_history_warning(
+                "Map snapshot capture failed: {}: {}".format(
+                    type(exc).__name__, exc))
+            return None
+        finally:
+            if temporary:
+                try:
+                    os.unlink(temporary)
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    pass
+
     def _restore_history(self, state):
         """Replay capped records into final/static widgets without re-appending."""
         state = state or {}
@@ -814,6 +994,13 @@ class ChatDock(QDockWidget):
                     self._add_assistant_message(
                         self._record_text(record, "text"), persist=False,
                         timestamp=stamp)
+                elif kind == "snapshot":
+                    self._add_snapshot_card(
+                        self._record_text(record, "path"),
+                        self._record_text(
+                            record, "caption",
+                            "Map after this step — " + stamp),
+                        persist=False, animate=False)
                 if index and index % 25 == 0:
                     QCoreApplication.processEvents()
 
@@ -1274,6 +1461,7 @@ class ChatDock(QDockWidget):
         except Exception:
             context_block = build_attached_files_section(attachments)
         self._active_turn = {
+            "id": secrets.token_hex(12),
             "text": text,
             "context_block": context_block,
             "resumed": bool(self.backend.session_id),
@@ -1283,6 +1471,10 @@ class ChatDock(QDockWidget):
             "tool_reports": [],
             "subagent_events": [],
             "attachments": [dict(item) for item in attachments],
+            "visual_change_tool_ran": False,
+            "terminal_snapshot_attempted": False,
+            "explicit_snapshot_fingerprints": set(),
+            "explicit_snapshot_sequence": 0,
         }
         if queue_task is not None:
             queue_task["status"] = "running"
@@ -1639,6 +1831,10 @@ class ChatDock(QDockWidget):
     def _on_tool_call(self, name, args):
         if self._perf is not None:
             self._perf["tool_calls"] += 1
+        canonical_name = _canonical_qgis_tool_name(name)
+        if (self._active_turn is not None
+                and canonical_name in _VISUAL_CHANGE_TOOLS):
+            self._active_turn["visual_change_tool_ran"] = True
         self._end_stream()
         self._hide_thinking()
         if self._last_tool_chip is not None and not self._last_tool_finished:
@@ -1682,6 +1878,8 @@ class ChatDock(QDockWidget):
             if report.get("result") is None:
                 report["result"] = str(text)
                 break
+        if _canonical_qgis_tool_name(self._last_tool_name) == _SNAPSHOT_TOOL:
+            self._record_explicit_snapshot(text)
 
     def _on_subagent_event(self, name, status):
         if self._active_turn is not None:
@@ -1756,6 +1954,7 @@ class ChatDock(QDockWidget):
                         subagent_id=info.get("id") or secrets.token_hex(8),
                         name=str(name), elapsed_s=round(elapsed, 3))
                     info["finished"] = True
+        self._capture_terminal_snapshot(turn)
         self._set_activity("Ready.")
         task_id = (turn or {}).get("queue_task_id")
         task = self._queue_task(task_id) if task_id else None
@@ -1787,6 +1986,7 @@ class ChatDock(QDockWidget):
             QTimer.singleShot(0, self._retry_after_missing_session)
             return
         self._add_error(message)
+        self._capture_terminal_snapshot(turn)
         self._set_activity("Error.")
         task_id = (turn or {}).get("queue_task_id")
         task = self._queue_task(task_id) if task_id else None

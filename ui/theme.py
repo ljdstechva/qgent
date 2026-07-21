@@ -152,6 +152,23 @@ QToolButton#QgentAttachmentRemove:hover {{
 }}
 #QgentMessageTags {{ background: transparent; }}
 
+/* ---- inline map snapshots ---- */
+QFrame#QgentSnapshotCard {{
+    background: {t.surface}; border: 1px solid {t.border};
+    border-radius: 11px;
+}}
+QLabel#QgentSnapshotPreview {{
+    color: {t.text_muted}; background: {t.surface_hi};
+    border: none; border-radius: 8px;
+}}
+QFrame#QgentSnapshotCard[missing="true"] QLabel#QgentSnapshotPreview {{
+    border: 1px dashed {t.border}; font-size: 10px;
+}}
+QLabel#QgentSnapshotCaption {{
+    color: {t.text_muted}; background: transparent;
+    border: none; font-size: 9px;
+}}
+
 /* ---- approval card ---- */
 #QgentApproval {{
     background: {t.warn_bg}; border: 1px solid {t.warn};

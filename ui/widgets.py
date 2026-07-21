@@ -11,11 +11,12 @@ Visual language (see theme.py):
 Nothing here talks to the agent — the dock wires signals into these widgets.
 """
 import json
+import os
 import time
 from datetime import datetime
 
-from qgis.PyQt.QtCore import Qt, QTimer, pyqtSignal
-from qgis.PyQt.QtGui import QColor
+from qgis.PyQt.QtCore import Qt, QTimer, QUrl, pyqtSignal
+from qgis.PyQt.QtGui import QColor, QDesktopServices, QPixmap
 from qgis.PyQt.QtWidgets import (
     QFrame, QLabel, QVBoxLayout, QHBoxLayout, QToolButton, QTextBrowser,
     QPushButton, QPlainTextEdit, QWidget, QSizePolicy, QApplication,
@@ -487,6 +488,99 @@ class StatusNote(QLabel):
         self.setStyleSheet(
             f"color: {tokens.text_muted}; background: transparent; "
             "font-size: 10px; padding: 2px 6px;")
+
+
+class _SnapshotPreview(QLabel):
+    """Clickable image surface used by :class:`SnapshotCard`."""
+
+    activated = pyqtSignal()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self.isEnabled():
+            self.activated.emit()
+        super().mouseReleaseEvent(event)
+
+
+class SnapshotCard(QFrame):
+    """Durable map preview with a quiet missing-file fallback."""
+
+    MAX_CARD_WIDTH = 320
+    MAX_PREVIEW_HEIGHT = 360
+
+    def __init__(self, path, caption, tokens, parent=None, opener=None):
+        super().__init__(parent)
+        self.t = tokens
+        self.path = os.path.abspath(os.path.normpath(str(path or "")))
+        self.caption = str(caption or "Map after this step")
+        self._opener = opener or self._open_in_system_viewer
+        self._source_pixmap = QPixmap(self.path) if self.path else QPixmap()
+        self._missing = self._source_pixmap.isNull()
+
+        self.setObjectName("QgentSnapshotCard")
+        self.setProperty("missing", "true" if self._missing else "false")
+        self.setMinimumWidth(180)
+        self.setMaximumWidth(self.MAX_CARD_WIDTH)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(7, 7, 7, 7)
+        layout.setSpacing(5)
+
+        self.preview = _SnapshotPreview()
+        self.preview.setObjectName("QgentSnapshotPreview")
+        self.preview.setAlignment(Qt.AlignCenter)
+        self.preview.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        if self._missing:
+            self.preview.setText("Map snapshot unavailable")
+            self.preview.setEnabled(False)
+            self.preview.setMinimumHeight(92)
+        else:
+            self.preview.setToolTip("Open the full-size map snapshot")
+            self.preview.setCursor(Qt.PointingHandCursor)
+            self.preview.activated.connect(self.open_full_size)
+        layout.addWidget(self.preview)
+
+        self.caption_label = QLabel(self.caption)
+        self.caption_label.setObjectName("QgentSnapshotCaption")
+        self.caption_label.setWordWrap(True)
+        layout.addWidget(self.caption_label)
+        QTimer.singleShot(0, self._layout_preview)
+
+    def is_placeholder(self):
+        return self._missing
+
+    def open_full_size(self):
+        """Open the durable PNG; failures remain quiet inside the card."""
+        if self._missing or not os.path.isfile(self.path):
+            return False
+        try:
+            return bool(self._opener(self.path))
+        except Exception:
+            return False
+
+    @staticmethod
+    def _open_in_system_viewer(path):
+        return QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._layout_preview()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        QTimer.singleShot(0, self._layout_preview)
+
+    def _layout_preview(self):
+        available = max(120, min(
+            self.MAX_CARD_WIDTH - 14, self.width() - 14))
+        if self._missing:
+            self.preview.setMinimumWidth(available)
+            return
+        shown = self._source_pixmap.scaled(
+            available, self.MAX_PREVIEW_HEIGHT,
+            Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self.preview.setPixmap(shown)
+        self.preview.setFixedSize(available, shown.height())
 
 
 # ===========================================================================
