@@ -95,7 +95,36 @@ def build_selected_layers_section(selected_layers):
     return "\n".join(lines) if len(lines) > 1 else ""
 
 
-def build_context_block(iface, selected_layers=None):
+def build_attached_files_section(attached_files):
+    """Format the files frozen for this request without touching them."""
+    attached_files = list(attached_files or [])
+    if not attached_files:
+        return ""
+    lines = [
+        "## ATTACHED FILES (the user dropped these for this request):"
+    ]
+    for item in attached_files:
+        try:
+            path = str(item["path"]).replace("\r", " ").replace("\n", " ")
+            if not path:
+                continue
+            size = int(item["size"])
+            extension = str(item.get("extension") or "unknown")
+            kind = str(
+                item.get("file_kind") or item.get("context_kind")
+                or item.get("kind") or "file")
+            lines.append(
+                f"  - {path} [{kind}; {size} bytes; {extension}]")
+            warning = str(item.get("warning") or "").strip()
+            if warning:
+                warning = warning.replace("\r", " ").replace("\n", " ")
+                lines.append(f"    Warning: {warning}")
+        except (KeyError, TypeError, ValueError):
+            continue
+    return "\n".join(lines) if len(lines) > 1 else ""
+
+
+def build_context_block(iface, selected_layers=None, attached_files=None):
     project = QgsProject.instance()
     canvas = iface.mapCanvas()
     active = iface.activeLayer()
@@ -136,4 +165,7 @@ def build_context_block(iface, selected_layers=None):
     selected_section = build_selected_layers_section(selected_layers)
     if selected_section:
         lines.extend(["", selected_section])
+    attached_section = build_attached_files_section(attached_files)
+    if attached_section:
+        lines.extend(["", attached_section])
     return "\n".join(lines)

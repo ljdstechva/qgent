@@ -132,6 +132,24 @@ QLabel#QgentContextChip, QLabel#QgentMessageTag {{
     border: 1px solid {t.border}; border-radius: 8px;
     padding: 2px 7px; font-size: 9px;
 }}
+QFrame#QgentAttachmentChip {{
+    color: {t.text_muted}; background: {t.chip_bg};
+    border: 1px solid {t.border}; border-radius: 8px;
+}}
+QFrame#QgentAttachmentChip[warning="true"] {{
+    background: {t.warn_bg}; border-color: {t.warn};
+}}
+QFrame#QgentAttachmentChip QLabel#QgentAttachmentLabel {{
+    color: {t.text_muted}; background: transparent; border: none;
+    padding: 0; font-size: 9px;
+}}
+QToolButton#QgentAttachmentRemove {{
+    color: {t.text_muted}; background: transparent; border: none;
+    border-radius: 6px; padding: 0 3px; font-size: 11px;
+}}
+QToolButton#QgentAttachmentRemove:hover {{
+    color: {t.text}; background: {t.surface_hi};
+}}
 #QgentMessageTags {{ background: transparent; }}
 
 /* ---- approval card ---- */

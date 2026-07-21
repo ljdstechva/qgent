@@ -142,7 +142,8 @@ class MessageBubble(QWidget):
             if widget is not None:
                 widget.deleteLater()
         for tag in self._tags:
-            pill = QLabel("📎 " + tag)
+            shown = tag if tag.startswith("📄 ") else "📎 " + tag
+            pill = QLabel(shown)
             pill.setObjectName("QgentMessageTag")
             pill.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
             self.tags_layout.addWidget(pill)
@@ -500,8 +501,54 @@ class ContextChip(QLabel):
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
 
+class AttachmentChip(QFrame):
+    """One removable, in-place file attachment in the live context strip."""
+
+    remove_requested = pyqtSignal(str)
+
+    def __init__(self, item, parent=None):
+        super().__init__(parent)
+        self.item = dict(item or {})
+        self.path = str(self.item.get("path") or "")
+        self.setObjectName("QgentAttachmentChip")
+        self.setProperty(
+            "warning", "true" if self.item.get("warning") else "false")
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+
+        row = QHBoxLayout(self)
+        row.setContentsMargins(6, 1, 2, 1)
+        row.setSpacing(2)
+        self.label = QLabel(ContextStrip._item_label(self.item))
+        self.label.setObjectName("QgentAttachmentLabel")
+        row.addWidget(self.label)
+        self.remove_btn = QToolButton()
+        self.remove_btn.setObjectName("QgentAttachmentRemove")
+        self.remove_btn.setText("×")
+        self.remove_btn.setToolTip(
+            "Remove this file from the next request")
+        self.remove_btn.setCursor(Qt.PointingHandCursor)
+        self.remove_btn.clicked.connect(
+            lambda _checked=False: self.remove_requested.emit(self.path))
+        row.addWidget(self.remove_btn)
+
+        details = [self.path]
+        kind = str(self.item.get("file_kind") or "file")
+        try:
+            details.append(f"{kind} · {int(self.item.get('size') or 0)} bytes")
+        except (TypeError, ValueError):
+            details.append(kind)
+        warning = str(self.item.get("warning") or "").strip()
+        if warning:
+            details.append("Warning: " + warning)
+        tooltip = "\n".join(value for value in details if value)
+        self.setToolTip(tooltip)
+        self.label.setToolTip(tooltip)
+
+
 class ContextStrip(QFrame):
-    """Live selected-node strip shown directly above the composer."""
+    """Live selected-node and pending-file strip above the composer."""
+
+    remove_requested = pyqtSignal(str)
 
     MAX_VISIBLE = 5
 
@@ -523,25 +570,47 @@ class ContextStrip(QFrame):
             if widget is not None:
                 widget.deleteLater()
 
-        labels = [self._item_label(item) for item in self._items]
-        visible = labels[:self.MAX_VISIBLE]
-        if len(labels) > self.MAX_VISIBLE:
-            visible.append(f"+{len(labels) - self.MAX_VISIBLE} more")
-        self._labels = tuple(visible)
-        for label in self._labels:
-            self._layout.addWidget(ContextChip(label))
+        selected = [item for item in self._items
+                    if item.get("kind") != "attachment"]
+        attachments = [item for item in self._items
+                       if item.get("kind") == "attachment"]
+        visible_items = list(selected[:self.MAX_VISIBLE])
+        if len(selected) > self.MAX_VISIBLE:
+            visible_items.append({
+                "kind": "summary",
+                "name": f"+{len(selected) - self.MAX_VISIBLE} more",
+            })
+        # Attachments are never hidden behind the selected-layer cap because
+        # every pending file must remain individually removable.
+        visible_items.extend(attachments)
+        self._labels = tuple(self._item_label(item) for item in visible_items)
+        for item, label in zip(visible_items, self._labels):
+            if item.get("kind") == "attachment":
+                chip = AttachmentChip(item)
+                chip.remove_requested.connect(self.remove_requested.emit)
+            else:
+                chip = ContextChip(label)
+            self._layout.addWidget(chip)
         self._layout.addStretch(1)
-        self.setVisible(bool(labels))
+        self.setVisible(bool(visible_items))
 
     def displayed_labels(self):
         return self._labels
 
+    def items(self):
+        return tuple(dict(item) for item in self._items)
+
     @staticmethod
     def _item_label(item):
         name = str(item.get("name") or "unnamed")
+        if item.get("kind") == "attachment":
+            prefix = "⚠ " if item.get("warning") else ""
+            return f"{prefix}📄 {name}"
         if item.get("kind") == "group":
             count = int(item.get("layer_count") or 0)
             return f"📁 {name} ({count} layers)"
+        if item.get("kind") == "summary":
+            return name
         return f"🗂 {name}"
 
 

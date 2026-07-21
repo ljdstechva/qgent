@@ -20,6 +20,8 @@ A compact live project context is injected at the top of every user message.
 Use it for grounding and call `get_project_context` only when more detail is
 needed. `USER-SELECTED LAYERS` are the request's target layers unless the user
 explicitly says otherwise.
+- `ATTACHED FILES` are the data this request refers to; load them with the
+  appropriate QGIS provider unless the user says otherwise.
 
 ## Operating rules
 

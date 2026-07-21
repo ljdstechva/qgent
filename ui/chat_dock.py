@@ -45,7 +45,9 @@ from .widgets import (
 from .settings_dialog import SettingsDialog
 from ..bridge.qgis_socket_server import BridgeServer
 from ..bridge.main_thread_executor import MainThreadExecutor
-from ..context.project_snapshot import build_context_block, snapshot_layer
+from ..context.project_snapshot import (
+    build_attached_files_section, build_context_block, snapshot_layer,
+)
 from ..history import (
     HistoryStore, bounded_json_value, clipped_text, create_batch_backup,
 )
@@ -63,10 +65,71 @@ _SUGGESTIONS = [
     "Make an A3 vicinity map of the current canvas extent",
 ]
 
+_ATTACHMENT_KINDS = {
+    ".shp": "ESRI Shapefile",
+    ".gpkg": "GeoPackage",
+    ".geojson": "GeoJSON",
+    ".json": "JSON",
+    ".kml": "KML",
+    ".kmz": "KMZ archive",
+    ".tif": "GeoTIFF raster",
+    ".tiff": "GeoTIFF raster",
+    ".csv": "CSV table",
+    ".qml": "QGIS layer style",
+    ".qpt": "QGIS print layout template",
+}
+
+
+def _attachment_descriptor(path):
+    """Return immutable metadata for one dropped local path, never opening it."""
+    raw = str(path or "").strip()
+    if not raw:
+        return None, "Dropped item has no local file path."
+    full_path = os.path.abspath(os.path.normpath(raw))
+    name = os.path.basename(full_path) or full_path
+    extension = os.path.splitext(full_path)[1].casefold()
+    if extension not in _ATTACHMENT_KINDS:
+        return None, f"Unsupported file: {name}"
+    if not os.path.isfile(full_path):
+        return None, f"File is unavailable: {name}"
+    try:
+        size = int(os.path.getsize(full_path))
+    except OSError as exc:
+        return None, f"Could not attach {name}: {exc}"
+
+    warnings = []
+    if extension == ".shp":
+        stem = os.path.splitext(full_path)[0]
+        required = [stem + suffix for suffix in (".shx", ".dbf")]
+        missing_required = [os.path.basename(item) for item in required
+                            if not os.path.isfile(item)]
+        if missing_required:
+            warnings.append(
+                "Missing required Shapefile sidecar(s): "
+                + ", ".join(missing_required) + ".")
+        projection = stem + ".prj"
+        if not os.path.isfile(projection):
+            warnings.append(
+                "Missing optional projection sidecar: "
+                + os.path.basename(projection) + ".")
+
+    return {
+        "kind": "attachment",
+        "path": full_path,
+        "key": os.path.normcase(full_path),
+        "name": name,
+        "size": size,
+        "extension": extension,
+        "file_kind": _ATTACHMENT_KINDS[extension],
+        "warnings": warnings,
+        "warning": " ".join(warnings),
+    }, ""
+
 
 class ChatDock(QDockWidget):
     def __init__(self, iface, plugin_dir, diagnostic_logs=None):
         super().__init__("QGent", iface.mainWindow())
+        self.setAcceptDrops(True)
         self.iface = iface
         self.plugin_dir = plugin_dir
         self.runtime_dir = os.path.join(plugin_dir, "claude_runtime")
@@ -112,6 +175,7 @@ class ChatDock(QDockWidget):
         self._queue_stop_error = ""
         self._tray_icon = None
         self._notification_events = []
+        self._attached_files = []
 
         # token coalescing
         self._stream_buf = ""
@@ -230,6 +294,8 @@ class ChatDock(QDockWidget):
 
         # -- selected-layer context ---------------------------------------
         self.context_strip = ContextStrip()
+        self.context_strip.remove_requested.connect(
+            self._remove_attached_file)
         outer.addWidget(self.context_strip)
 
         # -- composer ------------------------------------------------------
@@ -268,6 +334,117 @@ class ChatDock(QDockWidget):
 
     def focus_input(self):
         self.input.setFocus()
+
+    # -- file drops --------------------------------------------------------
+    def dragEnterEvent(self, event):
+        try:
+            if event.mimeData().hasUrls():
+                event.acceptProposedAction()
+                return
+        except (AttributeError, RuntimeError, TypeError):
+            pass
+        super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event):
+        try:
+            if event.mimeData().hasUrls():
+                event.acceptProposedAction()
+                return
+        except (AttributeError, RuntimeError, TypeError):
+            pass
+        super().dragMoveEvent(event)
+
+    def dropEvent(self, event):
+        try:
+            mime = event.mimeData()
+            urls = list(mime.urls()) if mime.hasUrls() else []
+        except (AttributeError, RuntimeError, TypeError):
+            urls = []
+        if not urls:
+            super().dropEvent(event)
+            return
+
+        paths = []
+        for url in urls:
+            try:
+                path = str(url.toLocalFile() or "") if url.isLocalFile() else ""
+                if path:
+                    paths.append(path)
+                else:
+                    label = str(url.fileName() or url.toString() or "item")
+                    self._push_drop_warning(
+                        f"Unsupported non-local file: {label}")
+            except (AttributeError, RuntimeError, TypeError):
+                self._push_drop_warning("Unsupported dropped item.")
+        self._attach_dropped_paths(paths)
+        event.acceptProposedAction()
+
+    def _push_drop_warning(self, message):
+        message = str(message)
+        try:
+            self.iface.messageBar().pushMessage(
+                "QGent", message, level=Qgis.Warning, duration=5)
+        except Exception:
+            # Drop rejection is advisory and must never escape the Qt event.
+            pass
+        self._set_activity(message)
+
+    def _attach_dropped_paths(self, paths):
+        accepted = []
+        rejected = []
+        existing = {str(item.get("key") or "") for item in self._attached_files}
+        for path in paths or ():
+            descriptor, error = _attachment_descriptor(path)
+            if descriptor is None:
+                rejected.append({"path": str(path or ""), "error": error})
+                self._push_drop_warning(error)
+                continue
+            if descriptor["key"] in existing:
+                self._set_activity(
+                    f"Already attached: {descriptor['name']}")
+                continue
+            existing.add(descriptor["key"])
+            self._attached_files.append(descriptor)
+            accepted.append(dict(descriptor))
+        if accepted:
+            self._update_layer_context_strip()
+            suffix = "file" if len(accepted) == 1 else "files"
+            self._set_activity(
+                f"Attached {len(accepted)} {suffix} to the next request.")
+        return accepted, rejected
+
+    def _attachment_snapshot(self):
+        return tuple(dict(item) for item in self._attached_files)
+
+    @staticmethod
+    def _attachment_tags(attachments):
+        return tuple(
+            f"📄 {str(item.get('name') or os.path.basename(str(item.get('path') or '')))}"
+            for item in (attachments or ())
+            if str(item.get("name") or item.get("path") or "").strip()
+        )
+
+    def _consume_attached_files(self, attachments):
+        keys = {str(item.get("key") or os.path.normcase(
+            str(item.get("path") or ""))) for item in (attachments or ())}
+        if not keys:
+            return
+        self._attached_files = [
+            item for item in self._attached_files
+            if str(item.get("key") or "") not in keys
+        ]
+        self._update_layer_context_strip()
+
+    def _remove_attached_file(self, path):
+        key = os.path.normcase(os.path.abspath(os.path.normpath(str(path or ""))))
+        before = len(self._attached_files)
+        self._attached_files = [
+            item for item in self._attached_files
+            if str(item.get("key") or "") != key
+        ]
+        if len(self._attached_files) != before:
+            self._update_layer_context_strip()
+            self._set_activity("Removed file from the next request.")
 
     # -- selected-layer context --------------------------------------------
     def _connect_layer_selection(self):
@@ -361,7 +538,9 @@ class ChatDock(QDockWidget):
         }
 
     def _update_layer_context_strip(self):
-        self.context_strip.set_items(self._selection_chip_items())
+        items = list(self._selection_chip_items())
+        items.extend(self._attachment_snapshot())
+        self.context_strip.set_items(items)
 
     # -- activity helpers ---------------------------------------------------
     def _set_activity(self, text):
@@ -838,6 +1017,7 @@ class ChatDock(QDockWidget):
         self.input.clear()
 
     def _enqueue_text(self, text):
+        attachments = self._attachment_snapshot()
         task = {
             "id": secrets.token_hex(8),
             "text": str(text),
@@ -852,12 +1032,17 @@ class ChatDock(QDockWidget):
             "verdict": "",
             "layers_created": [],
             "files_exported": [],
+            "attachments": [dict(item) for item in attachments],
         }
         self._queue_tasks.append(task)
         if self._queue_running:
             self._batch_task_ids.append(task["id"])
         self._history_append(
-            "queue", event="enqueued", task_id=task["id"], text=task["text"])
+            "queue", event="enqueued", task_id=task["id"], text=task["text"],
+            attachments=bounded_json_value(list(attachments)))
+        # A queued request now owns this frozen snapshot; later drops belong
+        # to later requests and cannot leak into the queued task.
+        self._consume_attached_files(attachments)
         self._sync_queue_panel()
         self._set_activity("Added request to the queue.")
         return task
@@ -1052,6 +1237,13 @@ class ChatDock(QDockWidget):
             return False
 
         selection = self._capture_layer_selection()
+        if queue_task is None:
+            attachments = self._attachment_snapshot()
+        else:
+            attachments = tuple(
+                dict(item) for item in (queue_task.get("attachments") or []))
+        message_tags = tuple(selection["tags"]) + self._attachment_tags(
+            attachments)
         marker = text.split(maxsplit=1)[0].upper()
         task_id = marker[1:-1] if marker in (
             "[T1]", "[T2]", "[T3]", "[T4]", "[T5]", "[T6]", "[SMOKE]") else "adhoc"
@@ -1063,7 +1255,8 @@ class ChatDock(QDockWidget):
         self._history_update_session()
         if queue_task is None:
             self.input.clear()
-        self._add_user_message(text, selection["tags"])
+        self._add_user_message(
+            text, message_tags, attachments=attachments)
         self._current_bubble = None
         self._last_tool_chip = None
         self._last_tool_id = None
@@ -1076,9 +1269,10 @@ class ChatDock(QDockWidget):
 
         try:
             context_block = build_context_block(
-                self.iface, selected_layers=selection["layers"])
+                self.iface, selected_layers=selection["layers"],
+                attached_files=attachments)
         except Exception:
-            context_block = ""
+            context_block = build_attached_files_section(attachments)
         self._active_turn = {
             "text": text,
             "context_block": context_block,
@@ -1088,6 +1282,7 @@ class ChatDock(QDockWidget):
             "assistant_parts": [],
             "tool_reports": [],
             "subagent_events": [],
+            "attachments": [dict(item) for item in attachments],
         }
         if queue_task is not None:
             queue_task["status"] = "running"
@@ -1101,10 +1296,13 @@ class ChatDock(QDockWidget):
             queue_task["files_exported"] = []
             self._history_append(
                 "queue", event="task_started", task_id=queue_task["id"],
-                text=queue_task["text"])
+                text=queue_task["text"],
+                attachments=bounded_json_value(list(attachments)))
             self._sync_queue_panel()
         try:
             self.backend.send(text, context_block)
+            if queue_task is None:
+                self._consume_attached_files(attachments)
             return True
         except Exception as exc:
             message = f"{type(exc).__name__}: {exc}"
@@ -1807,7 +2005,8 @@ class ChatDock(QDockWidget):
             self._history_append("assistant", text=str(text))
         return bubble
 
-    def _add_user_message(self, text, tags=None, persist=True, timestamp=None):
+    def _add_user_message(self, text, tags=None, attachments=None,
+                          persist=True, timestamp=None):
         bubble = MessageBubble("user", self.t)
         bubble.set_tags(tags)
         self._add_widget(bubble)
@@ -1815,7 +2014,9 @@ class ChatDock(QDockWidget):
             bubble.set_timestamp(timestamp)
         bubble.set_text(text)
         if persist:
-            self._history_append("user", text=str(text), tags=list(tags or []))
+            self._history_append(
+                "user", text=str(text), tags=list(tags or []),
+                attachments=bounded_json_value(list(attachments or [])))
 
     def _add_error(self, text, persist=True, timestamp=None):
         bubble = MessageBubble("assistant", self.t)

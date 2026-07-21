@@ -27,6 +27,8 @@ detail beyond it (e.g. full field lists).
 
 - `USER-SELECTED LAYERS` in that context are the layers the request refers to
   unless the message says otherwise.
+- `ATTACHED FILES` are the data this request refers to; load them with the
+  appropriate QGIS provider unless the user says otherwise.
 
 ## Subagents (Task tool)
 - **data-scout** (light) — inspects layers/CRS/attributes/paths; validates data
