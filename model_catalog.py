@@ -5,6 +5,12 @@ from __future__ import annotations
 
 MODEL_ROLES = ("supervisor", "worker", "light")
 CUSTOM_MODEL_SENTINEL = "__qgent_custom_model__"
+MODEL_PRESET_SPEED = "speed"
+MODEL_PRESET_MAX_QUALITY = "max_quality"
+MODEL_PRESET_CUSTOM = "custom"
+LIGHT_ROLE_TOOLTIP = (
+    "Scout/verifier are read-and-report; bigger models only slow them down."
+)
 
 # Neither Claude Code 2.1.214 nor Codex CLI 0.144.1 exposes a headless model
 # enumeration command. ``id`` is the single ordinary chat value; ``aliases``
@@ -67,6 +73,38 @@ MODEL_DEFAULTS = {
     },
 }
 
+# Presets intentionally reuse the existing per-backend/per-role settings.  A
+# preset is UI shorthand for an exact three-value signature, never a separate
+# persisted setting.
+MODEL_PRESET_OPTIONS = (
+    ("Speed (recommended)", MODEL_PRESET_SPEED),
+    ("Max quality", MODEL_PRESET_MAX_QUALITY),
+    ("Custom…", MODEL_PRESET_CUSTOM),
+)
+
+MODEL_PRESETS = {
+    MODEL_PRESET_SPEED: {
+        "claude": {
+            "supervisor": "sonnet", "worker": "sonnet", "light": "haiku",
+        },
+        "codex": {
+            "supervisor": "gpt-5.6-terra",
+            "worker": "gpt-5.6-terra",
+            "light": "gpt-5.6-terra",
+        },
+    },
+    MODEL_PRESET_MAX_QUALITY: {
+        "claude": {
+            "supervisor": "fable", "worker": "sonnet", "light": "haiku",
+        },
+        "codex": {
+            "supervisor": "gpt-5.6-sol",
+            "worker": "gpt-5.6-sol",
+            "light": "gpt-5.6-sol",
+        },
+    },
+}
+
 MODEL_IDS_BY_BACKEND = {
     backend: tuple(entry["id"] for entry in entries)
     for backend, entries in MODEL_CATALOG.items()
@@ -82,6 +120,43 @@ def model_options(backend):
     """Return ``(friendly label, CLI id)`` rows for the selected backend."""
     entries = MODEL_CATALOG.get(str(backend or "").lower(), ())
     return tuple((entry["label"], entry["id"]) for entry in entries)
+
+
+def model_preset_options():
+    """Return the three primary preset rows in their required UI order."""
+    return MODEL_PRESET_OPTIONS
+
+
+def model_preset_values(backend, preset):
+    """Return a copy of one preset's per-role ids, or an empty mapping."""
+    backend = str(backend or "").lower()
+    values = MODEL_PRESETS.get(str(preset or ""), {}).get(backend, {})
+    return {role: values[role] for role in MODEL_ROLES if role in values}
+
+
+def classify_model_preset(backend, choices):
+    """Classify exact stored choices without inventing preset provenance."""
+    backend = str(backend or "").lower()
+    choices = choices if isinstance(choices, dict) else {}
+    for preset in (MODEL_PRESET_SPEED, MODEL_PRESET_MAX_QUALITY):
+        expected = model_preset_values(backend, preset)
+        if len(expected) != len(MODEL_ROLES):
+            continue
+        matches = True
+        for role in MODEL_ROLES:
+            choice = choices.get(role, {})
+            if not isinstance(choice, dict):
+                matches = False
+                break
+            if bool(choice.get("custom")):
+                matches = False
+                break
+            if str(choice.get("model_id") or "").strip() != expected[role]:
+                matches = False
+                break
+        if matches:
+            return preset
+    return MODEL_PRESET_CUSTOM
 
 
 def accepted_model_ids(backend):

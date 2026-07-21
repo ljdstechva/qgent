@@ -13,9 +13,12 @@ import sys
 from qgis.PyQt.QtCore import QSettings
 
 from .model_catalog import (
-    CUSTOM_MODEL_SENTINEL, MODEL_CATALOG, MODEL_DEFAULTS,
-    MODEL_IDS_BY_BACKEND, MODEL_ROLES, accepted_model_ids, default_model,
-    model_ids, model_options, normalize_model_id, repair_model_specs,
+    CUSTOM_MODEL_SENTINEL, LIGHT_ROLE_TOOLTIP, MODEL_CATALOG, MODEL_DEFAULTS,
+    MODEL_IDS_BY_BACKEND, MODEL_PRESET_CUSTOM, MODEL_PRESET_MAX_QUALITY,
+    MODEL_PRESET_SPEED, MODEL_ROLES, accepted_model_ids,
+    classify_model_preset, default_model, model_ids, model_options,
+    model_preset_options, model_preset_values, normalize_model_id,
+    repair_model_specs,
 )
 
 GROUP = "QgisCopilot"

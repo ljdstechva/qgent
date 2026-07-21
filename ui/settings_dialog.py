@@ -6,7 +6,7 @@ from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QFileDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout, QLabel,
-    QLineEdit, QPlainTextEdit, QPushButton,
+    QLineEdit, QPlainTextEdit, QPushButton, QToolButton,
     QScrollArea, QSpinBox, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 
@@ -31,6 +31,13 @@ class SettingsDialog(QDialog):
         self._model_memory = {
             backend: {
                 role: dict(config.get_model_choice(backend, role))
+                for role in config.MODEL_ROLES
+            }
+            for backend in ("claude", "codex")
+        }
+        self._model_original = {
+            backend: {
+                role: dict(self._model_memory[backend][role])
                 for role in config.MODEL_ROLES
             }
             for backend in ("claude", "codex")
@@ -89,6 +96,22 @@ class SettingsDialog(QDialog):
 
         self.models_group = QGroupBox("Models — Claude Code")
         mform = QFormLayout(self.models_group)
+        self.model_preset = QComboBox()
+        for label, preset in config.model_preset_options():
+            self.model_preset.addItem(label, preset)
+        mform.addRow("Preset", self.model_preset)
+
+        self.models_advanced_toggle = QToolButton()
+        self.models_advanced_toggle.setText("Advanced")
+        self.models_advanced_toggle.setCheckable(True)
+        self.models_advanced_toggle.setToolButtonStyle(
+            Qt.ToolButtonTextBesideIcon)
+        self.models_advanced_toggle.setArrowType(Qt.RightArrow)
+        mform.addRow(self.models_advanced_toggle)
+
+        self.models_advanced_container = QWidget()
+        advanced_form = QFormLayout(self.models_advanced_container)
+        advanced_form.setContentsMargins(18, 0, 0, 0)
         sup_row, self.model_sup, self.model_sup_custom = (
             self._create_model_selector("supervisor"))
         worker_row, self.model_worker, self.model_worker_custom = (
@@ -98,22 +121,31 @@ class SettingsDialog(QDialog):
         self.model_sup_label = QLabel("Supervisor / geoprocessor / cartographer")
         self.model_worker_label = QLabel("Worker (override)")
         self.model_light_label = QLabel("Light (data-scout, qa-verifier)")
-        mform.addRow(self.model_sup_label, sup_row)
-        mform.addRow(self.model_worker_label, worker_row)
-        mform.addRow(self.model_light_label, light_row)
+        self.model_light_label.setToolTip(config.LIGHT_ROLE_TOOLTIP)
+        light_row.setToolTip(config.LIGHT_ROLE_TOOLTIP)
+        self.model_light.setToolTip(config.LIGHT_ROLE_TOOLTIP)
+        advanced_form.addRow(self.model_sup_label, sup_row)
+        advanced_form.addRow(self.model_worker_label, worker_row)
+        advanced_form.addRow(self.model_light_label, light_row)
+        note = QLabel(
+            "Each model appears once. Choose Custom… only when you need to "
+            "enter an unlisted raw CLI model id.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color: palette(mid); font-size: 11px;")
+        advanced_form.addRow(note)
+        mform.addRow(self.models_advanced_container)
         self.codex_single_agent_note = QLabel(
             "Codex runs single-agent — only the main model is used.")
         self.codex_single_agent_note.setWordWrap(True)
         self.codex_single_agent_note.setStyleSheet(
             "color: palette(mid); font-size: 11px;")
         mform.addRow(self.codex_single_agent_note)
-        note = QLabel(
-            "Each model appears once. Choose Custom… only when you need to "
-            "enter an unlisted raw CLI model id.")
-        note.setWordWrap(True)
-        note.setStyleSheet("color: palette(mid); font-size: 11px;")
-        mform.addRow(note)
         outer.addWidget(self.models_group)
+        self.model_preset.currentIndexChanged.connect(
+            self._on_model_preset_changed)
+        self.models_advanced_toggle.toggled.connect(
+            self._set_models_advanced_visible)
+        self._set_models_advanced_visible(False)
         self.backend.currentIndexChanged.connect(self._update_backend_rows)
 
         gs = QGroupBox("Safety & execution")
@@ -227,22 +259,29 @@ class SettingsDialog(QDialog):
     # ==================================================================
     def _create_model_selector(self, role):
         row = QWidget()
+        row.setMinimumHeight(24)
         layout = QHBoxLayout(row)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
         combo = QComboBox()
         combo.setEditable(False)
+        combo.setMinimumHeight(24)
         custom = QLineEdit()
+        custom.setMinimumHeight(24)
         custom.setPlaceholderText("Raw model id")
         custom.setVisible(False)
         layout.addWidget(combo, 1)
         layout.addWidget(custom, 1)
         self._model_controls[role] = {
             "row": row, "combo": combo, "custom": custom,
+            "preserve_raw_choice": False, "preserved_choice": None,
         }
         combo.currentIndexChanged.connect(
             lambda _index, selected_role=role:
             self._toggle_model_custom(selected_role))
+        custom.textEdited.connect(
+            lambda _text, selected_role=role:
+            self._mark_raw_model_edited(selected_role))
         return row, combo, custom
 
     def _update_backend_rows(self):
@@ -256,6 +295,7 @@ class SettingsDialog(QDialog):
         self._update_cli_row()
         self._populate_model_combos(backend)
         self._update_model_mode(backend)
+        self._sync_model_preset(backend)
 
     def _update_cli_row(self):
         is_codex = self.backend.currentData() == "codex"
@@ -281,30 +321,105 @@ class SettingsDialog(QDialog):
                 for label, model_id in config.model_options(backend):
                     combo.addItem(label, model_id)
                 combo.addItem("Custom…", config.CUSTOM_MODEL_SENTINEL)
-                normalized = config.normalize_model_id(
-                    backend, choice.get("model_id"))
-                is_custom = bool(choice.get("custom"))
-                if is_custom:
+                raw_value = str(choice.get("model_id") or "").strip()
+                explicit_custom = bool(choice.get("custom"))
+                exact_catalog_id = raw_value in config.model_ids(backend)
+                show_raw = explicit_custom or not exact_catalog_id
+                if show_raw:
                     index = combo.findData(config.CUSTOM_MODEL_SENTINEL)
-                    custom_edit.setText(choice.get("model_id") or "")
+                    custom_edit.setText(raw_value)
+                    controls["preserve_raw_choice"] = True
+                    controls["preserved_choice"] = {
+                        "model_id": raw_value, "custom": explicit_custom,
+                    }
                 else:
-                    selected = normalized or config.default_model(backend, role)
-                    index = combo.findData(selected)
+                    index = combo.findData(raw_value)
                     custom_edit.clear()
+                    controls["preserve_raw_choice"] = False
+                    controls["preserved_choice"] = None
                 combo.setCurrentIndex(max(0, index))
                 combo.blockSignals(False)
-                custom_edit.setVisible(is_custom)
+                custom_edit.setVisible(show_raw)
         finally:
             self._loading_models = False
+
+    def _sync_model_preset(self, backend):
+        preset = config.classify_model_preset(
+            backend, self._model_memory.get(backend, {}))
+        index = self.model_preset.findData(preset)
+        self.model_preset.blockSignals(True)
+        try:
+            self.model_preset.setCurrentIndex(max(0, index))
+        finally:
+            self.model_preset.blockSignals(False)
+        self._set_models_advanced_expanded(
+            preset == config.MODEL_PRESET_CUSTOM)
+
+    def _on_model_preset_changed(self):
+        if self._loading_models:
+            return
+        backend = self._active_model_backend
+        preset = self.model_preset.currentData()
+        if backend not in self._model_memory:
+            return
+        if preset == config.MODEL_PRESET_CUSTOM:
+            self._set_models_advanced_expanded(True)
+            return
+        values = config.model_preset_values(backend, preset)
+        if len(values) != len(config.MODEL_ROLES):
+            return
+        self._model_memory[backend] = {
+            role: {"model_id": values[role], "custom": False}
+            for role in config.MODEL_ROLES
+        }
+        self._populate_model_combos(backend)
+        self._set_models_advanced_expanded(False)
+
+    def _set_models_advanced_visible(self, expanded):
+        expanded = bool(expanded)
+        self.models_advanced_container.setVisible(expanded)
+        self.models_advanced_toggle.setArrowType(
+            Qt.DownArrow if expanded else Qt.RightArrow)
+
+    def _set_models_advanced_expanded(self, expanded):
+        expanded = bool(expanded)
+        self.models_advanced_toggle.blockSignals(True)
+        try:
+            self.models_advanced_toggle.setChecked(expanded)
+        finally:
+            self.models_advanced_toggle.blockSignals(False)
+        self._set_models_advanced_visible(expanded)
+
+    def _mark_model_preset_custom(self):
+        index = self.model_preset.findData(config.MODEL_PRESET_CUSTOM)
+        self.model_preset.blockSignals(True)
+        try:
+            self.model_preset.setCurrentIndex(max(0, index))
+        finally:
+            self.model_preset.blockSignals(False)
+        self._set_models_advanced_expanded(True)
 
     def _toggle_model_custom(self, role):
         if self._loading_models:
             return
         controls = self._model_controls[role]
+        controls["preserve_raw_choice"] = False
+        controls["preserved_choice"] = None
         custom = controls["combo"].currentData() == config.CUSTOM_MODEL_SENTINEL
         controls["custom"].setVisible(custom)
         if custom:
             controls["custom"].setFocus(Qt.OtherFocusReason)
+        self._remember_visible_model_choices()
+        self._mark_model_preset_custom()
+
+    def _mark_raw_model_edited(self, role):
+        if self._loading_models:
+            return
+        controls = self._model_controls[role]
+        controls["preserve_raw_choice"] = False
+        controls["preserved_choice"] = None
+        self._remember_visible_model_choices()
+        self._mark_model_preset_custom()
 
     def _remember_visible_model_choices(self):
         backend = self._active_model_backend
@@ -316,9 +431,16 @@ class SettingsDialog(QDialog):
             custom = value == config.CUSTOM_MODEL_SENTINEL
             if custom:
                 value = controls["custom"].text().strip()
+                preserved = controls.get("preserved_choice") or {}
+                if (controls.get("preserve_raw_choice")
+                        and value == preserved.get("model_id")):
+                    custom = bool(preserved.get("custom"))
+                else:
+                    custom = bool(value)
+                    value = value or config.default_model(backend, role)
             self._model_memory[backend][role] = {
-                "model_id": str(value or config.default_model(backend, role)),
-                "custom": bool(custom and value),
+                "model_id": str(value or ""),
+                "custom": bool(custom),
             }
 
     def _update_model_mode(self, backend):
@@ -327,14 +449,18 @@ class SettingsDialog(QDialog):
         self.models_group.setTitle(
             "Models — Codex" if is_codex else "Models — Claude Code")
         self.codex_single_agent_note.setVisible(is_codex)
-        for role, label in (
-                ("worker", self.model_worker_label),
-                ("light", self.model_light_label)):
-            row = self._model_controls[role]["row"]
-            row.setEnabled(not is_codex)
-            label.setEnabled(not is_codex)
-            row.setToolTip(caption if is_codex else "")
-            label.setToolTip(caption if is_codex else "")
+        worker_row = self._model_controls["worker"]["row"]
+        worker_row.setEnabled(not is_codex)
+        self.model_worker_label.setEnabled(not is_codex)
+        worker_row.setToolTip(caption if is_codex else "")
+        self.model_worker_label.setToolTip(caption if is_codex else "")
+
+        light_row = self._model_controls["light"]["row"]
+        light_row.setEnabled(not is_codex)
+        self.model_light_label.setEnabled(not is_codex)
+        light_row.setToolTip(config.LIGHT_ROLE_TOOLTIP)
+        self.model_light_label.setToolTip(config.LIGHT_ROLE_TOOLTIP)
+        self.model_light.setToolTip(config.LIGHT_ROLE_TOOLTIP)
 
     def _browse_cli(self):
         start = self.cli_path.text() or os.path.expanduser("~")
@@ -370,6 +496,10 @@ class SettingsDialog(QDialog):
         for stored_backend in ("claude", "codex"):
             for role in config.MODEL_ROLES:
                 choice = self._model_memory[stored_backend][role]
+                original = self._model_original[stored_backend][role]
+                if (choice["model_id"] == original["model_id"]
+                        and bool(choice["custom"]) == bool(original["custom"])):
+                    continue
                 config.set_model_choice(
                     stored_backend, role, choice["model_id"], choice["custom"])
         # Keep legacy keys synchronized for older callers, but all Goal 6 code
