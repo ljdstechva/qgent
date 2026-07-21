@@ -24,13 +24,14 @@ import time
 from qgis.PyQt.QtCore import (
     Qt, QTimer, QCoreApplication, QSettings, QStandardPaths,
 )
+from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import (
     QDockWidget, QWidget, QVBoxLayout, QHBoxLayout, QScrollArea, QLabel,
     QToolButton, QFrame, QMenu, QFileDialog, QMessageBox, QApplication,
-    QPushButton,
+    QPushButton, QSystemTrayIcon,
 )
 from qgis.core import (
-    QgsApplication, QgsLayerTreeGroup, QgsLayerTreeLayer, QgsMessageLog,
+    Qgis, QgsApplication, QgsLayerTreeGroup, QgsLayerTreeLayer, QgsMessageLog,
     QgsProject,
 )
 
@@ -51,6 +52,9 @@ from ..history import (
 from ..export import (
     default_export_name, plugin_version, read_history_jsonl, render_markdown,
     write_markdown, write_pdf,
+)
+from ..turn_report import (
+    batch_token_totals, build_turn_report, render_batch_summary,
 )
 
 _SUGGESTIONS = [
@@ -104,6 +108,10 @@ class ChatDock(QDockWidget):
         self._queue_auto_approvals = []
         self._batch_task_ids = []
         self._ignore_next_terminal = False
+        self._queue_stop_reason = ""
+        self._queue_stop_error = ""
+        self._tray_icon = None
+        self._notification_events = []
 
         # token coalescing
         self._stream_buf = ""
@@ -839,6 +847,11 @@ class ChatDock(QDockWidget):
             "started_at": None,
             "elapsed_s": None,
             "error": "",
+            "usage": None,
+            "tokens": None,
+            "verdict": "",
+            "layers_created": [],
+            "files_exported": [],
         }
         self._queue_tasks.append(task)
         if self._queue_running:
@@ -961,6 +974,8 @@ class ChatDock(QDockWidget):
             "Project is unsaved - no file backup was possible." if not saved else "")
         self._queue_auto_approvals = []
         self._batch_task_ids = [task["id"] for task in queued]
+        self._queue_stop_reason = ""
+        self._queue_stop_error = ""
         self._history_append(
             "queue", event="batch_started", policy=policy,
             backup_path=backup["path"], warning=self._queue_warning,
@@ -1022,9 +1037,8 @@ class ChatDock(QDockWidget):
             return False
         if self.backend is None:
             if queue_task is not None:
-                self._mark_queue_task(
-                    queue_task, "failed", "Backend is unavailable.")
-                QTimer.singleShot(0, self._queue_idle_checkpoint)
+                self._stop_queue_after_error(
+                    queue_task, "Backend is unavailable.")
             return False
         if self.backend.is_busy():
             return False
@@ -1034,8 +1048,7 @@ class ChatDock(QDockWidget):
                 "then set its path in Settings.")
             self._add_error(message)
             if queue_task is not None:
-                self._mark_queue_task(queue_task, "failed", message)
-                QTimer.singleShot(0, self._queue_idle_checkpoint)
+                self._stop_queue_after_error(queue_task, message)
             return False
 
         selection = self._capture_layer_selection()
@@ -1072,12 +1085,20 @@ class ChatDock(QDockWidget):
             "resumed": bool(self.backend.session_id),
             "fallback_attempted": False,
             "queue_task_id": queue_task.get("id") if queue_task else None,
+            "assistant_parts": [],
+            "tool_reports": [],
+            "subagent_events": [],
         }
         if queue_task is not None:
             queue_task["status"] = "running"
             queue_task["started_at"] = time.monotonic()
             queue_task["elapsed_s"] = None
             queue_task["error"] = ""
+            queue_task["usage"] = None
+            queue_task["tokens"] = None
+            queue_task["verdict"] = ""
+            queue_task["layers_created"] = []
+            queue_task["files_exported"] = []
             self._history_append(
                 "queue", event="task_started", task_id=queue_task["id"],
                 text=queue_task["text"])
@@ -1091,8 +1112,7 @@ class ChatDock(QDockWidget):
             self._finish_perf()
             self._add_error(message)
             if queue_task is not None:
-                self._mark_queue_task(queue_task, "failed", message)
-                QTimer.singleShot(0, self._queue_idle_checkpoint)
+                self._stop_queue_after_error(queue_task, message)
             return False
 
     def _mark_queue_task(self, task, status, error=""):
@@ -1110,8 +1130,41 @@ class ChatDock(QDockWidget):
         self._history_append(
             "queue", event=f"task_{status}", task_id=task.get("id"),
             text=task.get("text", ""), elapsed_s=task.get("elapsed_s"),
-            error=task.get("error", ""))
+            error=task.get("error", ""), usage=task.get("usage"),
+            tokens=task.get("tokens"), verdict=task.get("verdict", ""),
+            layers_created=list(task.get("layers_created") or []),
+            files_exported=list(task.get("files_exported") or []))
         self._sync_queue_panel()
+
+    @staticmethod
+    def _apply_turn_report(task, turn, terminal_payload=None):
+        if task is None:
+            return
+        task.update(build_turn_report(turn, terminal_payload))
+
+    def _stop_queue_after_error(self, task, message):
+        """Fail one terminally errored task and stop this batch at idle."""
+        error = str(message or "Agent backend error.")
+        self._mark_queue_task(task, "failed", error)
+        if not self._queue_running:
+            return
+        self._queue_stop_requested = True
+        self._queue_stop_reason = "error"
+        self._queue_stop_error = error
+        batch_ids = set(self._batch_task_ids)
+        for queued in self._queue_tasks:
+            if (queued.get("id") in batch_ids
+                    and queued.get("status") == "queued"):
+                self._mark_queue_task(
+                    queued, "skipped", "Skipped after a previous task failed.")
+        if self.bridge is not None:
+            self.bridge.clear_batch_permission_mode()
+        self._cancel_pending_approvals("Queue stopped after an agent error")
+        self._history_append(
+            "queue", event="batch_error_stop_requested",
+            task_id=(task or {}).get("id"), error=error)
+        self._sync_queue_panel()
+        QTimer.singleShot(0, self._queue_idle_checkpoint)
 
     def _queue_idle_checkpoint(self):
         backend_busy = bool(self.backend is not None and self.backend.is_busy())
@@ -1154,19 +1207,32 @@ class ChatDock(QDockWidget):
             "status": task.get("status", "queued"),
             "elapsed_s": task.get("elapsed_s"),
             "error": task.get("error", ""),
+            "usage": task.get("usage"),
+            "tokens": task.get("tokens"),
+            "verdict": task.get("verdict", ""),
+            "layers_created": list(task.get("layers_created") or []),
+            "files_exported": list(task.get("files_exported") or []),
         } for task in tasks]
+        passed = sum(1 for task in tasks if task.get("status") == "done")
         failures = sum(1 for task in tasks if task.get("status") == "failed")
         skipped = sum(1 for task in tasks if task.get("status") == "skipped")
+        total_tokens, unavailable_tokens = batch_token_totals(tasks)
         policy = self._queue_policy or "pause"
         backup_path = (self._queue_backup or {}).get("path", "")
+        stop_reason = self._queue_stop_reason
+        stop_error = self._queue_stop_error
         summary = self._queue_summary_text(
             rows, policy, backup_path, self._queue_warning, wall_time,
-            failures, skipped, self._queue_auto_approvals, stopped)
+            failures, skipped, self._queue_auto_approvals, stopped,
+            stop_reason=stop_reason)
         self._history_append(
             "queue_summary", text=summary, policy=policy,
             backup_path=backup_path, warning=self._queue_warning,
             tasks=rows, failure_count=failures, skip_count=skipped,
+            pass_count=passed, total_tokens=total_tokens,
+            token_usage_unavailable_count=unavailable_tokens,
             wall_time_s=round(wall_time, 3), stopped=bool(stopped),
+            stop_reason=stop_reason, stop_error=stop_error,
             auto_approvals=list(self._queue_auto_approvals))
         self._add_assistant_message(summary, persist=False)
 
@@ -1179,41 +1245,29 @@ class ChatDock(QDockWidget):
         self._queue_warning = ""
         self._queue_auto_approvals = []
         self._batch_task_ids = []
+        self._queue_stop_reason = ""
+        self._queue_stop_error = ""
         self._sync_queue_panel()
         self._set_activity("Queue stopped." if stopped else "Queue complete.")
+        if stopped and stop_reason == "error":
+            detail = (": " + stop_error) if stop_error else "."
+            self._notify_batch_attention(
+                "error", "QGent queue stopped on error" + detail)
+        elif stopped:
+            self._notify_batch_attention("stopped", "QGent queue stopped.")
+        else:
+            self._notify_batch_attention(
+                "complete", "QGent queue complete: {} passed, {} failed.".format(
+                    passed, failures))
 
     @staticmethod
     def _queue_summary_text(rows, policy, backup_path, warning, wall_time,
-                            failures, skipped, auto_approvals, stopped):
-        heading = "Queue stopped" if stopped else "Queue complete"
-        lines = [
-            f"**{heading}**",
-            f"- Approval policy: {policy}",
-            f"- Pre-run backup: `{backup_path}`",
-        ]
-        if warning:
-            lines.append(f"- Warning: {warning}")
-        lines.append("- Tasks:")
-        icons = {"done": "✓", "failed": "✕", "skipped": "↪",
-                 "queued": "⏸", "running": "▶"}
-        for index, row in enumerate(rows, 1):
-            status = row.get("status", "queued")
-            elapsed = row.get("elapsed_s")
-            elapsed_text = f"{float(elapsed):.1f}s" if elapsed is not None else "n/a"
-            text = " ".join(str(row.get("text") or "").split())[:60]
-            line = f"  {index}. {icons.get(status, '?')} {status} ({elapsed_text}) - {text}"
-            if row.get("error"):
-                line += f" — {row['error']}"
-            lines.append(line)
-        lines.extend([
-            f"- Failures: {failures}; skipped: {skipped}",
-            f"- Wall time: {wall_time:.1f}s",
-            f"- Auto-approved destructive operations: {len(auto_approvals)}",
-        ])
-        for index, approval in enumerate(auto_approvals, 1):
-            reasons = "; ".join(approval.get("reasons") or []) or "no scan reason"
-            lines.append(f"  {index}. {reasons}")
-        return "\n".join(lines)
+                            failures, skipped, auto_approvals, stopped,
+                            stop_reason=""):
+        del failures, skipped  # Counts are derived from the immutable rows.
+        return render_batch_summary(
+            rows, policy, backup_path, warning, wall_time, auto_approvals,
+            stopped=stopped, stop_reason=stop_reason)
 
     def _stop_queue_task(self, task_id):
         turn = self._active_turn or {}
@@ -1237,6 +1291,8 @@ class ChatDock(QDockWidget):
         if not self._queue_running:
             return
         self._queue_stop_requested = True
+        self._queue_stop_reason = "user"
+        self._queue_stop_error = ""
         self._history_append("queue", event="stop_all_requested")
         if self.bridge is not None:
             self.bridge.clear_batch_permission_mode()
@@ -1291,6 +1347,8 @@ class ChatDock(QDockWidget):
         self._queue_tasks = []
         self._batch_task_ids = []
         self._ignore_next_terminal = False
+        self._queue_stop_reason = ""
+        self._queue_stop_error = ""
         self.queue_panel.clear()
         if self.history_store is not None:
             try:
@@ -1349,6 +1407,8 @@ class ChatDock(QDockWidget):
         # benchmark metric is unaffected by the 40 ms flush timer.
         if self._perf is not None and self._perf["ttft_ms"] is None:
             self._perf["ttft_ms"] = round((time.monotonic() - self._perf["start"]) * 1000)
+        if self._active_turn is not None:
+            self._active_turn.setdefault("assistant_parts", []).append(str(text))
         self._hide_thinking()
         if self._current_bubble is None:
             self._current_bubble = MessageBubble("assistant", self.t)
@@ -1390,12 +1450,21 @@ class ChatDock(QDockWidget):
                 name=self._last_tool_name, args=self._last_tool_args,
                 result="(no result captured)")
             self._last_tool_finished = True
+            reports = (self._active_turn or {}).get("tool_reports") or []
+            if reports and reports[-1].get("result") is None:
+                reports[-1]["result"] = "(no result captured)"
         chip = ToolChip(name, args, self.t)
         self._last_tool_chip = chip
         self._last_tool_id = secrets.token_hex(8)
         self._last_tool_name = str(name)
         self._last_tool_args = bounded_json_value(args)
         self._last_tool_finished = False
+        if self._active_turn is not None:
+            self._active_turn.setdefault("tool_reports", []).append({
+                "name": str(name),
+                "args": bounded_json_value(args),
+                "result": None,
+            })
         self._add_widget(chip)
         self._history_append(
             "tool", event="started", tool_id=self._last_tool_id,
@@ -1410,8 +1479,17 @@ class ChatDock(QDockWidget):
                 name=self._last_tool_name, args=self._last_tool_args,
                 result=clipped_text(text))
             self._last_tool_finished = True
+        reports = (self._active_turn or {}).get("tool_reports") or []
+        for report in reversed(reports):
+            if report.get("result") is None:
+                report["result"] = str(text)
+                break
 
     def _on_subagent_event(self, name, status):
+        if self._active_turn is not None:
+            self._active_turn.setdefault("subagent_events", []).append({
+                "name": str(name), "status": str(status),
+            })
         self._end_stream()
         if status == "started":
             if self._perf is not None:
@@ -1481,11 +1559,13 @@ class ChatDock(QDockWidget):
                         name=str(name), elapsed_s=round(elapsed, 3))
                     info["finished"] = True
         self._set_activity("Ready.")
+        task_id = (turn or {}).get("queue_task_id")
+        task = self._queue_task(task_id) if task_id else None
+        self._apply_turn_report(task, turn, _result)
         self._active_turn = None
         self._finish_perf()
-        task_id = (turn or {}).get("queue_task_id")
         if task_id:
-            self._mark_queue_task(self._queue_task(task_id), "done")
+            self._mark_queue_task(task, "done")
             QTimer.singleShot(0, self._queue_idle_checkpoint)
 
     def _on_error(self, message):
@@ -1510,13 +1590,13 @@ class ChatDock(QDockWidget):
             return
         self._add_error(message)
         self._set_activity("Error.")
+        task_id = (turn or {}).get("queue_task_id")
+        task = self._queue_task(task_id) if task_id else None
+        self._apply_turn_report(task, turn)
         self._active_turn = None
         self._finish_perf()
-        task_id = (turn or {}).get("queue_task_id")
         if task_id:
-            self._mark_queue_task(
-                self._queue_task(task_id), "failed", str(message))
-            QTimer.singleShot(0, self._queue_idle_checkpoint)
+            self._stop_queue_after_error(task, str(message))
 
     def _should_retry_missing_session(self, message):
         turn = self._active_turn
@@ -1667,11 +1747,48 @@ class ChatDock(QDockWidget):
             reasons=record["reasons"])
 
     def _notify_batch_attention(self, kind, message):
-        """Goal 11 hook; Goal 12 extends this into native notifications."""
+        """Fan one queue event out through every supported native channel."""
+        kind = str(kind)
+        message = str(message)
+        channels = []
+        try:
+            bar = self.iface.messageBar()
+            bar.pushMessage(
+                "QGent", message, level=Qgis.Info, duration=8)
+            channels.append("message_bar")
+        except Exception as exc:
+            self._log_history_warning(
+                "Could not show QGent message-bar notification: {}: {}".format(
+                    type(exc).__name__, exc))
+        try:
+            QApplication.alert(self.iface.mainWindow(), 0)
+            channels.append("taskbar_alert")
+        except Exception as exc:
+            self._log_history_warning(
+                "Could not request QGent taskbar attention: {}: {}".format(
+                    type(exc).__name__, exc))
+        try:
+            if (QSystemTrayIcon.isSystemTrayAvailable()
+                    and QSystemTrayIcon.supportsMessages()):
+                if self._tray_icon is None:
+                    icon_path = os.path.join(
+                        self.plugin_dir, "resources", "icon.svg")
+                    self._tray_icon = QSystemTrayIcon(QIcon(icon_path), self)
+                    self._tray_icon.setToolTip("QGent")
+                    self._tray_icon.show()
+                self._tray_icon.showMessage(
+                    "QGent", message, QSystemTrayIcon.Information, 8000)
+                channels.append("tray_balloon")
+        except Exception:
+            # Platform tray support is optional and deliberately silent.
+            pass
+        record = {"kind": kind, "message": message,
+                  "channels": list(channels)}
+        self._notification_events.append(record)
         self._history_append(
-            "queue", event="attention", attention_kind=str(kind),
-            message=str(message))
-        self._set_activity(str(message))
+            "queue", event="attention", attention_kind=kind,
+            message=message, channels=list(channels))
+        self._set_activity(message)
 
     # ======================================================================
     # Message list helpers
@@ -1682,8 +1799,13 @@ class ChatDock(QDockWidget):
         if timestamp is not None:
             bubble.set_timestamp(timestamp)
         bubble.set_text(str(text))
+        # Dynamic widgets can remain explicitly hidden in some QScrollArea
+        # paths (notably an offscreen batch-idle callback); make the completed
+        # assistant card visible after it has a measured document height.
+        bubble.show()
         if persist:
             self._history_append("assistant", text=str(text))
+        return bubble
 
     def _add_user_message(self, text, tags=None, persist=True, timestamp=None):
         bubble = MessageBubble("user", self.t)
@@ -1812,6 +1934,13 @@ class ChatDock(QDockWidget):
                 pass
         if self.bridge is not None:
             self.bridge.stop()
+        if self._tray_icon is not None:
+            try:
+                self._tray_icon.hide()
+                self._tray_icon.deleteLater()
+            except RuntimeError:
+                pass
+            self._tray_icon = None
 
 
 def _strip_toml_block(text, header):

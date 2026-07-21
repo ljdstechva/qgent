@@ -187,7 +187,9 @@ QToolButton#QgentQueueToggle:hover, QToolButton#QgentQueueRowButton:hover {{
 #QgentQueueTask[status="done"] {{ border-left: 3px solid {t.ok}; }}
 #QgentQueueTask[status="failed"] {{ border-left: 3px solid {t.danger}; }}
 #QgentQueueText {{ color: {t.text}; font-size: 10px; }}
-#QgentQueueState, #QgentQueueElapsed {{ color: {t.text_muted}; font-size: 9px; }}
+#QgentQueueState, #QgentQueueElapsed, #QgentQueueTokens {{
+    color: {t.text_muted}; font-size: 9px;
+}}
 QPushButton#QgentQueueRun, QPushButton#QgentSendAction {{
     color: #FFFFFF; background: {t.accent}; border: none;
     border-radius: 7px; padding: 6px 10px; font-weight: 600;

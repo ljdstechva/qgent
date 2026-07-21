@@ -13,7 +13,7 @@ QGIS bridge. The *real* destructive-op gate lives in the socket server.
 """
 from qgis.PyQt.QtCore import QProcess, QProcessEnvironment
 
-from .backend_base import AgentBackend
+from .backend_base import AgentBackend, normalized_usage
 from .stream_parser import StreamJsonParser
 from .. import config
 
@@ -143,7 +143,9 @@ class ClaudeCodeBackend(AgentBackend):
                 if isinstance(block, dict) and block.get("type") == "tool_result":
                     self._handle_tool_result(block)
         elif etype == "result":
-            self._final = evt
+            terminal = dict(evt)
+            terminal["qgent_usage"] = normalized_usage("claude", evt)
+            self._final = terminal
 
     def _handle_content_block(self, block):
         btype = block.get("type")

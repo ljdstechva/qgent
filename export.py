@@ -116,22 +116,22 @@ def render_markdown(records, metadata, exported_at=None, in_progress=False):
         kind = str(record.get("kind") or "")
         stamp = _clock(record.get("t"))
         if kind == "user":
-            lines.extend(["**You** — {}".format(stamp), ""])
+            lines.extend(["**You** - {}".format(stamp), ""])
             tags = record.get("tags") or []
             if tags:
                 lines.extend([
-                    "📎 " + ", ".join(str(tag) for tag in tags), "",
+                    "Attachments: " + ", ".join(str(tag) for tag in tags), "",
                 ])
             lines.extend([_stored_text(record.get("text", "")), "", "---", ""])
         elif kind == "assistant":
             role = "QGent status" if record.get("style") == "status" else "QGent"
             lines.extend([
-                "**{}** — {}".format(role, stamp), "",
+                "**{}** - {}".format(role, stamp), "",
                 _stored_text(record.get("text", "")), "", "---", "",
             ])
         elif kind == "error":
             lines.extend([
-                "> **⚠ Error — {}**".format(stamp), ">",
+                "> **Error - {}**".format(stamp), ">",
                 *_quote_lines(_stored_text(record.get("text", ""))),
                 "", "---", "",
             ])
@@ -159,7 +159,7 @@ def render_markdown(records, metadata, exported_at=None, in_progress=False):
             suffix = " ({:.3f} s)".format(float(elapsed)) if (
                 event == "finished" and isinstance(elapsed, (int, float))) else ""
             lines.extend([
-                "🤖 **{}** — {}{} — {}".format(
+                "**Subagent {}** - {}{} - {}".format(
                     _inline(record.get("name") or "subagent"), event, suffix, stamp),
                 "",
             ])
@@ -178,9 +178,17 @@ def render_markdown(records, metadata, exported_at=None, in_progress=False):
             lines.extend(_approval_block(outcome, stamp, reasons, code))
             lines.extend(["", "---", ""])
             rendered_approvals.add(approval_id)
+        elif kind == "queue":
+            lines.extend(_queue_event_block(record, stamp))
+            lines.extend(["", "---", ""])
+        elif kind == "queue_summary":
+            lines.extend([
+                "**QGent batch summary** - {}".format(stamp), "",
+                _stored_text(record.get("text", "")), "", "---", "",
+            ])
         else:
             lines.extend([
-                "> **ℹ {} — {}**".format(_inline(kind or "record"), stamp),
+                "> **Info: {} - {}**".format(_inline(kind or "record"), stamp),
                 ">",
                 *_quote_fence(json.dumps(record, ensure_ascii=False, indent=2), "json"),
                 "", "---", "",
@@ -209,7 +217,8 @@ def write_pdf(path, markdown, title="QGent Chat Export"):
     """Render Markdown to an A4 PDF with Qt only and return its absolute path."""
     from qgis.PyQt.QtCore import QMarginsF, QSizeF
     from qgis.PyQt.QtGui import (
-        QFont, QPageLayout, QPageSize, QPdfWriter, QTextDocument,
+        QFont, QFontDatabase, QPageLayout, QPageSize, QPdfWriter,
+        QTextDocument,
     )
 
     target = Path(path).resolve()
@@ -228,8 +237,26 @@ def write_pdf(path, markdown, title="QGent Chat Export"):
         )
         writer.setPageLayout(layout)
 
+        # Headless/offscreen QGIS can start with an empty Qt font database,
+        # which otherwise turns every PDF glyph into an unsearchable square.
+        database = QFontDatabase()
+        windows_fonts = Path(
+            os.environ.get("WINDIR", r"C:\Windows")) / "Fonts"
+        candidates = (
+            windows_fonts / "arial.ttf",
+            windows_fonts / "segoeui.ttf",
+            windows_fonts / "seguisym.ttf",
+            windows_fonts / "seguiemj.ttf",
+        )
+        for candidate in candidates:
+            if candidate.is_file():
+                QFontDatabase.addApplicationFont(str(candidate))
+        families = set(database.families())
+        family = "Arial" if "Arial" in families else (
+            "Segoe UI" if "Segoe UI" in families else "Sans Serif")
+
         document = QTextDocument()
-        document.setDefaultFont(QFont("Arial", 10))
+        document.setDefaultFont(QFont(family, 10))
         document.setDefaultStyleSheet(
             "body { color: #18222c; } "
             "pre, code { font-family: 'Consolas', 'Courier New', monospace; "
@@ -272,7 +299,7 @@ def _atomic_bytes(path, data):
 
 def _tool_block(name, stamp, arguments, result):
     lines = [
-        "> **▸ Tool `{}` — {}**".format(_inline(name), stamp),
+        "> **Tool `{}` - {}**".format(_inline(name), stamp),
         ">", "> **Arguments**", ">",
         *_quote_fence(_stored_text(arguments), "json"),
         ">", "> **Result**", ">",
@@ -283,7 +310,7 @@ def _tool_block(name, stamp, arguments, result):
 
 def _approval_block(outcome, stamp, reasons, code):
     lines = [
-        "> **⚑ Approval — {} — {}**".format(outcome, stamp),
+        "> **Approval - {} - {}**".format(outcome, stamp),
         ">", "> **Reasons**",
     ]
     if reasons:
@@ -292,6 +319,54 @@ def _approval_block(outcome, stamp, reasons, code):
         lines.append("> - (none recorded)")
     lines.extend([">", "> **Code**", ">"])
     lines.extend(_quote_fence(_stored_text(code), "python"))
+    return lines
+
+
+def _queue_event_block(record, stamp):
+    event = str(record.get("event") or "event").replace("_", " ").title()
+    lines = ["> **Queue - {} - {}**".format(_inline(event), stamp)]
+    details = []
+    if record.get("task_id"):
+        details.append("Task ID: `{}`".format(_inline(record.get("task_id"))))
+    if record.get("text"):
+        details.append("Task: {}".format(_one_line(record.get("text"))))
+    for key, label in (
+            ("message", "Message"), ("error", "Error"),
+            ("warning", "Warning"), ("reason", "Reason"),
+            ("policy", "Policy"), ("backup_path", "Backup"),
+            ("verdict", "Verdict")):
+        if record.get(key):
+            details.append("{}: {}".format(label, _one_line(record.get(key))))
+    if isinstance(record.get("elapsed_s"), (int, float)):
+        details.append("Elapsed: {:.3f} s".format(float(record["elapsed_s"])))
+    if (isinstance(record.get("tokens"), int)
+            and not isinstance(record.get("tokens"), bool)):
+        details.append("Tokens: {:,}".format(record["tokens"]))
+    layers = record.get("layers_created") or []
+    if layers:
+        values = []
+        for layer in layers:
+            if isinstance(layer, dict):
+                name = str(layer.get("name") or "")
+                count = layer.get("count")
+                values.append("{} ({})".format(name, count)
+                              if isinstance(count, int) else name)
+            else:
+                values.append(str(layer))
+        details.append("Layers created: " + ", ".join(values))
+    files = record.get("files_exported") or []
+    if files:
+        details.append("Files exported: " + ", ".join(str(item) for item in files))
+    reasons = record.get("reasons") or []
+    if reasons:
+        details.append("Approval reasons: " + "; ".join(str(item) for item in reasons))
+    channels = record.get("channels") or []
+    if channels:
+        details.append("Notification channels: " + ", ".join(
+            str(item) for item in channels))
+    if not details:
+        details.append("Event recorded.")
+    lines.extend("> - " + detail for detail in details)
     return lines
 
 
@@ -315,6 +390,10 @@ def _stored_text(value):
     if isinstance(value, str):
         return value
     return json.dumps(value, ensure_ascii=False, indent=2, sort_keys=False)
+
+
+def _one_line(value):
+    return " ".join(str(value or "").split())
 
 
 def _inline(value):
@@ -341,7 +420,7 @@ def _date_range(records):
 def _range_text(first, last):
     if not first:
         return "(empty)"
-    return "{} — {}".format(_format_stamp(first), _format_stamp(last))
+    return "{} - {}".format(_format_stamp(first), _format_stamp(last))
 
 
 def _format_stamp(value):

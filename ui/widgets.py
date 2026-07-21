@@ -586,6 +586,9 @@ class QueueTaskRow(QFrame):
         self.elapsed_label = QLabel("")
         self.elapsed_label.setObjectName("QgentQueueElapsed")
         row.addWidget(self.elapsed_label)
+        self.tokens_label = QLabel("")
+        self.tokens_label.setObjectName("QgentQueueTokens")
+        row.addWidget(self.tokens_label)
 
         self.up_btn = self._button("\u2191", "Move up")
         self.down_btn = self._button("\u2193", "Move down")
@@ -631,6 +634,14 @@ class QueueTaskRow(QFrame):
 
         self._started_at = task.get("started_at")
         self._elapsed_s = task.get("elapsed_s")
+        tokens = task.get("tokens")
+        if (isinstance(tokens, int) and not isinstance(tokens, bool)
+                and tokens >= 0):
+            self.tokens_label.setText("{:,} tok".format(tokens))
+            self.tokens_label.setToolTip("Reported CLI token usage")
+        else:
+            self.tokens_label.setText("")
+            self.tokens_label.setToolTip("")
         queued = status == "queued"
         running = status in ("running", "waiting_approval")
         self.up_btn.setVisible(queued)

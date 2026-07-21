@@ -17,7 +17,7 @@ import os
 
 from qgis.PyQt.QtCore import QProcess, QProcessEnvironment
 
-from .backend_base import AgentBackend
+from .backend_base import AgentBackend, normalized_usage
 from .stream_parser import StreamJsonParser
 from .. import config
 
@@ -212,7 +212,9 @@ class CodexBackend(AgentBackend):
             return
         if etype in ("turn.completed", "thread.completed"):
             self._got_result = True
-            self.done.emit(evt)
+            terminal = dict(evt)
+            terminal["qgent_usage"] = normalized_usage("codex", evt)
+            self.done.emit(terminal)
 
     def _on_finished(self, exit_code, _status):
         self.busy_changed.emit(False)
