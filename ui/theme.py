@@ -167,6 +167,47 @@ QPushButton#QgentSuggestion {{
 QPushButton#QgentSuggestion:hover {{ border-color: {t.accent}; color: {t.accent}; }}
 
 /* ---- composer ---- */
+#QgentQueuePanel {{
+    background: {t.surface}; border: 1px solid {t.border}; border-radius: 10px;
+}}
+#QgentQueuePanel QWidget {{ background: transparent; }}
+#QgentQueueTitle {{ color: {t.text}; font-size: 10px; font-weight: 700; }}
+QToolButton#QgentQueueToggle, QToolButton#QgentQueueRowButton {{
+    color: {t.text_muted}; background: transparent; border: none;
+    border-radius: 4px; padding: 2px 4px;
+}}
+QToolButton#QgentQueueToggle:hover, QToolButton#QgentQueueRowButton:hover {{
+    color: {t.text}; background: {t.surface_hi};
+}}
+#QgentQueueTask {{
+    background: {t.chip_bg}; border: 1px solid {t.border}; border-radius: 7px;
+}}
+#QgentQueueTask[status="running"] {{ border-left: 3px solid {t.accent}; }}
+#QgentQueueTask[status="waiting_approval"] {{ border-left: 3px solid {t.warn}; }}
+#QgentQueueTask[status="done"] {{ border-left: 3px solid {t.ok}; }}
+#QgentQueueTask[status="failed"] {{ border-left: 3px solid {t.danger}; }}
+#QgentQueueText {{ color: {t.text}; font-size: 10px; }}
+#QgentQueueState, #QgentQueueElapsed {{ color: {t.text_muted}; font-size: 9px; }}
+QPushButton#QgentQueueRun, QPushButton#QgentSendAction {{
+    color: #FFFFFF; background: {t.accent}; border: none;
+    border-radius: 7px; padding: 6px 10px; font-weight: 600;
+}}
+QPushButton#QgentQueueRun:hover, QPushButton#QgentSendAction:hover {{
+    background: {t.accent2};
+}}
+QPushButton#QgentQueueSecondary, QPushButton#QgentQueueStop,
+QPushButton#QgentQueueAdd, QPushButton#QgentStopCurrent {{
+    color: {t.text_muted}; background: transparent; border: 1px solid {t.border};
+    border-radius: 7px; padding: 5px 8px;
+}}
+QPushButton#QgentQueueStop:hover, QPushButton#QgentStopCurrent:hover {{
+    color: {t.danger}; border-color: {t.danger};
+}}
+QPushButton#QgentQueueSecondary:checked {{
+    color: {t.warn}; border-color: {t.warn};
+}}
+QPushButton:disabled {{ color: {t.text_muted}; background: {t.surface_hi}; }}
+
 #QgentComposer {{
     background: {t.surface}; border: 1.5px solid {t.border}; border-radius: 14px;
 }}

@@ -15,8 +15,7 @@ import time
 from datetime import datetime
 
 from qgis.PyQt.QtCore import Qt, QTimer, pyqtSignal
-from qgis.PyQt.QtGui import QPainter, QColor, QPolygonF, QPen
-from qgis.PyQt.QtCore import QPointF
+from qgis.PyQt.QtGui import QColor
 from qgis.PyQt.QtWidgets import (
     QFrame, QLabel, QVBoxLayout, QHBoxLayout, QToolButton, QTextBrowser,
     QPushButton, QPlainTextEdit, QWidget, QSizePolicy, QApplication,
@@ -460,6 +459,17 @@ class ApprovalCard(QFrame):
         self._static_note.setText(text)
         self._static_note.show()
 
+    def set_cancelled(self, reason="approval was cancelled"):
+        """Freeze a live card after its bridge wait has already ended."""
+        self._history_static = True
+        self.approve_btn.setEnabled(False)
+        self.deny_btn.setEnabled(False)
+        self.approve_btn.hide()
+        self.deny_btn.hide()
+        self.head.setText("&#9940; <b>Approval cancelled</b>")
+        self._static_note.setText(str(reason or "approval was cancelled"))
+        self._static_note.show()
+
     def is_static_state(self):
         return (self._history_static and not self.approve_btn.isVisible()
                 and not self.deny_btn.isVisible())
@@ -536,6 +546,238 @@ class ContextStrip(QFrame):
 
 
 # ===========================================================================
+# Sequential task queue
+# ===========================================================================
+class QueueTaskRow(QFrame):
+    """One task owned by the dock's sequential queue state machine."""
+
+    move_requested = pyqtSignal(str, int)
+    remove_requested = pyqtSignal(str)
+    stop_requested = pyqtSignal(str)
+
+    _STATUS = {
+        "queued": ("\u23f8", "Queued"),
+        "running": ("\u25b6", "Running"),
+        "waiting_approval": ("\u26a0", "Waiting for approval"),
+        "done": ("\u2713", "Done"),
+        "failed": ("\u2715", "Failed"),
+        "skipped": ("\u21aa", "Skipped"),
+    }
+
+    def __init__(self, task, tokens, parent=None):
+        super().__init__(parent)
+        self.t = tokens
+        self.task_id = str(task.get("id") or "")
+        self._started_at = None
+        self._elapsed_s = None
+        self.setObjectName("QgentQueueTask")
+
+        row = QHBoxLayout(self)
+        row.setContentsMargins(7, 5, 7, 5)
+        row.setSpacing(5)
+        self.state_label = QLabel()
+        self.state_label.setObjectName("QgentQueueState")
+        self.state_label.setFixedWidth(18)
+        row.addWidget(self.state_label)
+        self.text_label = QLabel()
+        self.text_label.setObjectName("QgentQueueText")
+        self.text_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        row.addWidget(self.text_label, 1)
+        self.elapsed_label = QLabel("")
+        self.elapsed_label.setObjectName("QgentQueueElapsed")
+        row.addWidget(self.elapsed_label)
+
+        self.up_btn = self._button("\u2191", "Move up")
+        self.down_btn = self._button("\u2193", "Move down")
+        self.remove_btn = self._button("\u2715", "Remove from queue")
+        self.stop_btn = self._button("Stop", "Stop this task")
+        row.addWidget(self.up_btn)
+        row.addWidget(self.down_btn)
+        row.addWidget(self.remove_btn)
+        row.addWidget(self.stop_btn)
+        self.up_btn.clicked.connect(
+            lambda: self.move_requested.emit(self.task_id, -1))
+        self.down_btn.clicked.connect(
+            lambda: self.move_requested.emit(self.task_id, 1))
+        self.remove_btn.clicked.connect(
+            lambda: self.remove_requested.emit(self.task_id))
+        self.stop_btn.clicked.connect(
+            lambda: self.stop_requested.emit(self.task_id))
+
+        self._timer = QTimer(self)
+        self._timer.setInterval(250)
+        self._timer.timeout.connect(self._update_elapsed)
+        self.update_task(task)
+
+    def _button(self, text, tooltip):
+        button = QToolButton(self)
+        button.setObjectName("QgentQueueRowButton")
+        button.setText(text)
+        button.setToolTip(tooltip)
+        button.setCursor(Qt.PointingHandCursor)
+        return button
+
+    def update_task(self, task):
+        text = " ".join(str(task.get("text") or "").split())
+        self.text_label.setText(_truncate(text, 60))
+        self.text_label.setToolTip(str(task.get("text") or ""))
+        status = str(task.get("status") or "queued")
+        icon, label = self._STATUS.get(status, ("?", status.title()))
+        self.state_label.setText(icon)
+        error = str(task.get("error") or "")
+        self.state_label.setToolTip(label + ((" - " + error) if error else ""))
+        self.setProperty("status", status)
+        theme.repolish(self)
+
+        self._started_at = task.get("started_at")
+        self._elapsed_s = task.get("elapsed_s")
+        queued = status == "queued"
+        running = status in ("running", "waiting_approval")
+        self.up_btn.setVisible(queued)
+        self.down_btn.setVisible(queued)
+        self.remove_btn.setVisible(queued)
+        self.stop_btn.setVisible(running)
+        if running and self._started_at is not None:
+            if not self._timer.isActive():
+                self._timer.start()
+        else:
+            self._timer.stop()
+        self._update_elapsed()
+
+    def set_position(self, can_move_up, can_move_down):
+        self.up_btn.setEnabled(bool(can_move_up))
+        self.down_btn.setEnabled(bool(can_move_down))
+
+    def _update_elapsed(self):
+        elapsed = self._elapsed_s
+        if elapsed is None and self._started_at is not None:
+            elapsed = max(0.0, time.monotonic() - float(self._started_at))
+        self.elapsed_label.setText(_format_elapsed(elapsed) if elapsed is not None else "")
+
+
+class QueuePanel(QFrame):
+    """Collapsible queue controls; task data remains owned by ``ChatDock``."""
+
+    run_requested = pyqtSignal()
+    pause_requested = pyqtSignal(bool)
+    stop_all_requested = pyqtSignal()
+    move_requested = pyqtSignal(str, int)
+    remove_requested = pyqtSignal(str)
+    stop_requested = pyqtSignal(str)
+
+    def __init__(self, tokens, parent=None):
+        super().__init__(parent)
+        self.t = tokens
+        self._rows = {}
+        self._batch_running = False
+        self.setObjectName("QgentQueuePanel")
+        root = QVBoxLayout(self)
+        root.setContentsMargins(7, 6, 7, 7)
+        root.setSpacing(5)
+
+        head = QHBoxLayout()
+        self.toggle_btn = QToolButton()
+        self.toggle_btn.setObjectName("QgentQueueToggle")
+        self.toggle_btn.setText("\u25be")
+        self.toggle_btn.setCursor(Qt.PointingHandCursor)
+        self.title = QLabel("QUEUE")
+        self.title.setObjectName("QgentQueueTitle")
+        head.addWidget(self.toggle_btn)
+        head.addWidget(self.title)
+        head.addStretch(1)
+        root.addLayout(head)
+
+        self.body = QWidget()
+        body_layout = QVBoxLayout(self.body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(5)
+        self.tasks_widget = QWidget()
+        self.tasks_layout = QVBoxLayout(self.tasks_widget)
+        self.tasks_layout.setContentsMargins(0, 0, 0, 0)
+        self.tasks_layout.setSpacing(3)
+        body_layout.addWidget(self.tasks_widget)
+
+        controls = QHBoxLayout()
+        self.run_btn = QPushButton("Run queue")
+        self.run_btn.setObjectName("QgentQueueRun")
+        self.pause_btn = QPushButton("Pause after current")
+        self.pause_btn.setObjectName("QgentQueueSecondary")
+        self.pause_btn.setCheckable(True)
+        self.stop_all_btn = QPushButton("Stop all")
+        self.stop_all_btn.setObjectName("QgentQueueStop")
+        controls.addWidget(self.run_btn)
+        controls.addWidget(self.pause_btn)
+        controls.addWidget(self.stop_all_btn)
+        body_layout.addLayout(controls)
+        root.addWidget(self.body)
+
+        self.toggle_btn.clicked.connect(self._toggle)
+        self.run_btn.clicked.connect(self.run_requested)
+        self.pause_btn.toggled.connect(self.pause_requested)
+        self.stop_all_btn.clicked.connect(self.stop_all_requested)
+        self.hide()
+        self.set_batch_running(False)
+
+    def set_tasks(self, tasks):
+        tasks = list(tasks or [])
+        ids = [str(task.get("id") or "") for task in tasks]
+        for task in tasks:
+            task_id = str(task.get("id") or "")
+            row = self._rows.get(task_id)
+            if row is None:
+                row = QueueTaskRow(task, self.t, self.tasks_widget)
+                row.move_requested.connect(self.move_requested)
+                row.remove_requested.connect(self.remove_requested)
+                row.stop_requested.connect(self.stop_requested)
+                self._rows[task_id] = row
+            else:
+                row.update_task(task)
+        for task_id in list(self._rows):
+            if task_id not in ids:
+                row = self._rows.pop(task_id)
+                row.setParent(None)
+                row.deleteLater()
+
+        while self.tasks_layout.count():
+            self.tasks_layout.takeAt(0)
+        for task in tasks:
+            self.tasks_layout.addWidget(self._rows[str(task.get("id") or "")])
+
+        queued = [str(task.get("id") or "") for task in tasks
+                  if task.get("status") == "queued"]
+        for pos, task_id in enumerate(queued):
+            self._rows[task_id].set_position(
+                pos > 0, pos < len(queued) - 1)
+        self.title.setText(f"QUEUE ({len(tasks)})")
+        self.setVisible(bool(tasks))
+        self.run_btn.setEnabled(bool(queued) and not self._batch_running)
+
+    def set_batch_running(self, running):
+        self._batch_running = bool(running)
+        if running:
+            self.run_btn.setEnabled(False)
+        self.pause_btn.setEnabled(bool(running))
+        self.stop_all_btn.setEnabled(bool(running))
+        if not running:
+            self.set_paused(False)
+
+    def set_paused(self, paused):
+        self.pause_btn.blockSignals(True)
+        self.pause_btn.setChecked(bool(paused))
+        self.pause_btn.setText("Resume queue" if paused else "Pause after current")
+        self.pause_btn.blockSignals(False)
+
+    def clear(self):
+        self.set_tasks([])
+        self.set_batch_running(False)
+
+    def _toggle(self):
+        visible = not self.body.isVisible()
+        self.body.setVisible(visible)
+        self.toggle_btn.setText("\u25be" if visible else "\u25b8")
+
+
+# ===========================================================================
 # Composer pieces
 # ===========================================================================
 class ChatInput(QPlainTextEdit):
@@ -571,55 +813,26 @@ class ChatInput(QPlainTextEdit):
         self.setFixedHeight(max(36, min(h, 120)))
 
 
-class SendStopButton(QToolButton):
+class SendStopButton(QPushButton):
     """Circular accent button that morphs between send (➤) and stop (■)."""
 
     def __init__(self, tokens, parent=None):
         super().__init__(parent)
         self.t = tokens
         self._busy = False
-        self._hover = False
-        self.setFixedSize(32, 32)
+        self.setObjectName("QgentSendAction")
+        self.setText("Send")
         self.setCursor(Qt.PointingHandCursor)
         self.setToolTip("Send (Enter)")
-        self.setStyleSheet("QToolButton { border: none; background: transparent; }")
 
     def set_busy(self, busy):
-        self._busy = busy
-        self.setToolTip("Stop" if busy else "Send (Enter)")
-        self.update()
+        self._busy = bool(busy)
+        self.setText("Add to queue" if busy else "Send")
+        self.setToolTip(
+            "Add this request to the queue" if busy else "Send (Enter)")
 
     def is_busy_state(self):
         return self._busy
-
-    def enterEvent(self, e):
-        self._hover = True
-        self.update()
-        super().enterEvent(e)
-
-    def leaveEvent(self, e):
-        self._hover = False
-        self.update()
-        super().leaveEvent(e)
-
-    def paintEvent(self, _event):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        color = QColor(self.t.danger if self._busy else self.t.accent)
-        if self._hover:
-            color = color.lighter(112)
-        p.setPen(Qt.NoPen)
-        p.setBrush(color)
-        p.drawEllipse(self.rect().adjusted(1, 1, -1, -1))
-        p.setBrush(QColor("#FFFFFF"))
-        cx, cy = self.width() / 2, self.height() / 2
-        if self._busy:
-            p.drawRoundedRect(int(cx - 5), int(cy - 5), 10, 10, 2, 2)
-        else:
-            tri = QPolygonF([QPointF(cx - 4, cy - 6), QPointF(cx - 4, cy + 6),
-                             QPointF(cx + 7, cy)])
-            p.drawPolygon(tri)
-        p.end()
 
 
 class SuggestionChip(QPushButton):
@@ -648,6 +861,15 @@ def _short_json(obj):
         return _truncate(json.dumps(obj, indent=2, ensure_ascii=False), 1500)
     except (TypeError, ValueError):
         return _truncate(str(obj), 1500)
+
+
+def _format_elapsed(value):
+    seconds = max(0, int(float(value or 0)))
+    minutes, seconds = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours:d}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes:d}:{seconds:02d}"
 
 
 def _truncate(text, n):

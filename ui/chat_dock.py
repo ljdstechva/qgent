@@ -27,6 +27,7 @@ from qgis.PyQt.QtCore import (
 from qgis.PyQt.QtWidgets import (
     QDockWidget, QWidget, QVBoxLayout, QHBoxLayout, QScrollArea, QLabel,
     QToolButton, QFrame, QMenu, QFileDialog, QMessageBox, QApplication,
+    QPushButton,
 )
 from qgis.core import (
     QgsApplication, QgsLayerTreeGroup, QgsLayerTreeLayer, QgsMessageLog,
@@ -38,13 +39,15 @@ from . import theme
 from .animations import fade_in, smooth_scroll_to_bottom, staggered, ThinkingDots
 from .widgets import (
     MessageBubble, ToolChip, SubagentChip, ApprovalCard, ChatInput,
-    SendStopButton, SuggestionChip, ContextStrip, StatusNote,
+    SendStopButton, SuggestionChip, ContextStrip, StatusNote, QueuePanel,
 )
 from .settings_dialog import SettingsDialog
 from ..bridge.qgis_socket_server import BridgeServer
 from ..bridge.main_thread_executor import MainThreadExecutor
 from ..context.project_snapshot import build_context_block, snapshot_layer
-from ..history import HistoryStore, bounded_json_value, clipped_text
+from ..history import (
+    HistoryStore, bounded_json_value, clipped_text, create_batch_backup,
+)
 from ..export import (
     default_export_name, plugin_version, read_history_jsonl, render_markdown,
     write_markdown, write_pdf,
@@ -89,6 +92,18 @@ class ChatDock(QDockWidget):
         self._subagent_history = {}
         self._approval_history = {}
         self._active_turn = None
+        self._live_approvals = {}
+        self._queue_tasks = []
+        self._queue_running = False
+        self._queue_pause_after_current = False
+        self._queue_stop_requested = False
+        self._queue_started_at = None
+        self._queue_policy = None
+        self._queue_backup = None
+        self._queue_warning = ""
+        self._queue_auto_approvals = []
+        self._batch_task_ids = []
+        self._ignore_next_terminal = False
 
         # token coalescing
         self._stream_buf = ""
@@ -195,6 +210,16 @@ class ChatDock(QDockWidget):
         arow.addStretch(1)
         outer.addWidget(activity)
 
+        # -- sequential task queue ----------------------------------------
+        self.queue_panel = QueuePanel(self.t)
+        self.queue_panel.run_requested.connect(self.run_queue)
+        self.queue_panel.pause_requested.connect(self._set_queue_pause)
+        self.queue_panel.stop_all_requested.connect(self.stop_all_queue)
+        self.queue_panel.move_requested.connect(self._move_queue_task)
+        self.queue_panel.remove_requested.connect(self._remove_queue_task)
+        self.queue_panel.stop_requested.connect(self._stop_queue_task)
+        outer.addWidget(self.queue_panel)
+
         # -- selected-layer context ---------------------------------------
         self.context_strip = ContextStrip()
         outer.addWidget(self.context_strip)
@@ -210,6 +235,18 @@ class ChatDock(QDockWidget):
         self.input.focus_changed.connect(
             lambda on: self._set_composer_focus(composer, on))
         crow.addWidget(self.input, 1)
+        self.queue_add_btn = QPushButton("+ Queue")
+        self.queue_add_btn.setObjectName("QgentQueueAdd")
+        self.queue_add_btn.setCursor(Qt.PointingHandCursor)
+        self.queue_add_btn.setToolTip("Add this request without starting it")
+        self.queue_add_btn.clicked.connect(self.add_composer_to_queue)
+        crow.addWidget(self.queue_add_btn, 0, Qt.AlignBottom)
+        self.stop_turn_btn = QPushButton("Stop")
+        self.stop_turn_btn.setObjectName("QgentStopCurrent")
+        self.stop_turn_btn.setCursor(Qt.PointingHandCursor)
+        self.stop_turn_btn.clicked.connect(self.on_stop)
+        self.stop_turn_btn.hide()
+        crow.addWidget(self.stop_turn_btn, 0, Qt.AlignBottom)
         self.action_btn = SendStopButton(self.t)
         self.action_btn.clicked.connect(self._on_action_clicked)
         crow.addWidget(self.action_btn, 0, Qt.AlignBottom)
@@ -573,6 +610,23 @@ class ChatDock(QDockWidget):
                         self._add_widget(card, animate=False)
                     if record.get("event") == "decided":
                         card.set_static_outcome(bool(record.get("approved")))
+                    elif record.get("event") == "cancelled":
+                        card.set_cancelled(
+                            self._record_text(record, "reason", "Approval cancelled"))
+                elif kind == "queue":
+                    event = self._record_text(record, "event", "event")
+                    task_text = " ".join(
+                        self._record_text(record, "text").split())[:60]
+                    note = "Queue: " + event.replace("_", " ")
+                    if task_text:
+                        note += " - " + task_text
+                    if record.get("error"):
+                        note += " - " + self._record_text(record, "error")
+                    self._add_status_note(note, persist=False)
+                elif kind == "queue_summary":
+                    self._add_assistant_message(
+                        self._record_text(record, "text"), persist=False,
+                        timestamp=stamp)
                 if index and index % 25 == 0:
                     QCoreApplication.processEvents()
 
@@ -602,6 +656,8 @@ class ChatDock(QDockWidget):
         # Cross-thread → auto-queued to the GUI thread where these live.
         self.bridge.execute_requested.connect(self.executor.handle)
         self.bridge.approval_requested.connect(self.on_approval_requested)
+        self.bridge.approval_finished.connect(self._on_approval_finished)
+        self.bridge.auto_approved.connect(self._on_auto_approved)
         self.bridge.activity.connect(self._on_bridge_activity)
         port = self.bridge.start()
         self._bridge_port = port
@@ -710,6 +766,7 @@ class ChatDock(QDockWidget):
         previous_kind = self._backend_kind
         previous_session = None
         if self.backend is not None:
+            self._cancel_pending_approvals("Backend replaced")
             previous_session = self.backend.session_id
             try:
                 self.backend.blockSignals(True)
@@ -752,26 +809,234 @@ class ChatDock(QDockWidget):
     # Sending
     # ======================================================================
     def _on_action_clicked(self):
-        if self.action_btn.is_busy_state():
-            self.on_stop()
-        else:
-            self.on_send()
+        self.on_send()
 
     def on_send(self):
         text = self.input.toPlainText().strip()
         if not text:
             return
+        if (self._queue_running
+                or (self.backend is not None and self.backend.is_busy())):
+            self._enqueue_text(text)
+            self.input.clear()
+            return
+        self._start_turn(text)
+
+    def add_composer_to_queue(self):
+        text = self.input.toPlainText().strip()
+        if not text:
+            return
+        self._enqueue_text(text)
+        self.input.clear()
+
+    def _enqueue_text(self, text):
+        task = {
+            "id": secrets.token_hex(8),
+            "text": str(text),
+            "status": "queued",
+            "created_at": datetime.datetime.now().astimezone().isoformat(
+                timespec="milliseconds"),
+            "started_at": None,
+            "elapsed_s": None,
+            "error": "",
+        }
+        self._queue_tasks.append(task)
+        if self._queue_running:
+            self._batch_task_ids.append(task["id"])
+        self._history_append(
+            "queue", event="enqueued", task_id=task["id"], text=task["text"])
+        self._sync_queue_panel()
+        self._set_activity("Added request to the queue.")
+        return task
+
+    def _sync_queue_panel(self):
+        self.queue_panel.set_tasks(self._queue_tasks)
+        self.queue_panel.set_batch_running(self._queue_running)
+        self.queue_panel.set_paused(self._queue_pause_after_current)
+        busy = bool(self.backend is not None and self.backend.is_busy())
+        self.action_btn.set_busy(self._queue_running or busy)
+
+    def _queue_task(self, task_id):
+        return next((task for task in self._queue_tasks
+                     if task.get("id") == task_id), None)
+
+    def _move_queue_task(self, task_id, direction):
+        task = self._queue_task(task_id)
+        if task is None or task.get("status") != "queued":
+            return
+        current = self._queue_tasks.index(task)
+        candidates = [index for index, item in enumerate(self._queue_tasks)
+                      if item.get("status") == "queued"]
+        position = candidates.index(current)
+        target_position = position + (-1 if int(direction) < 0 else 1)
+        if target_position < 0 or target_position >= len(candidates):
+            return
+        target = candidates[target_position]
+        self._queue_tasks[current], self._queue_tasks[target] = (
+            self._queue_tasks[target], self._queue_tasks[current])
+        self._history_append(
+            "queue", event="reordered", task_id=task_id,
+            direction=-1 if int(direction) < 0 else 1)
+        self._sync_queue_panel()
+
+    def _remove_queue_task(self, task_id):
+        task = self._queue_task(task_id)
+        if task is None or task.get("status") != "queued":
+            return
+        self._queue_tasks.remove(task)
+        if task_id in self._batch_task_ids:
+            self._batch_task_ids.remove(task_id)
+        self._history_append(
+            "queue", event="removed", task_id=task_id,
+            text=task.get("text", ""))
+        self._sync_queue_panel()
+        if self._queue_running:
+            QTimer.singleShot(0, self._queue_idle_checkpoint)
+
+    def _set_queue_pause(self, paused):
+        if not self._queue_running:
+            return
+        self._queue_pause_after_current = bool(paused)
+        self._history_append(
+            "queue", event="pause_changed", paused=self._queue_pause_after_current)
+        self._sync_queue_panel()
+        if paused:
+            self._set_activity("Queue will pause after the current task.")
+        else:
+            self._set_activity("Queue resumed.")
+            QTimer.singleShot(0, self._queue_idle_checkpoint)
+
+    def run_queue(self):
+        queued = [task for task in self._queue_tasks
+                  if task.get("status") == "queued"]
+        if not queued or self._queue_running:
+            return
+        if self.backend is None or self.backend.is_busy():
+            self._set_activity("Wait for the current turn before running the queue.")
+            return
+
+        project = QgsProject.instance()
+        project_path = str(project.fileName() or "")
+        saved = bool(project_path)
+        policy = self._choose_queue_policy(saved, bool(project.isDirty()))
+        if policy is None:
+            return
+        if policy == "auto" and not saved:
+            self._history_append(
+                "queue", event="auto_rejected_unsaved",
+                warning="Project is unsaved; auto-approve is unavailable.")
+            self._set_activity(
+                "Auto-approve is unavailable until the project is saved.")
+            return
+        try:
+            backup = create_batch_backup(
+                QgsApplication.qgisSettingsDirPath(), project_path,
+                self._project_layer_manifest())
+        except Exception as exc:
+            message = f"{type(exc).__name__}: {exc}"
+            self._history_append(
+                "queue", event="backup_failed", error=message)
+            QMessageBox.critical(
+                self, "QGent queue backup failed",
+                "No queued tasks were started because the pre-run backup "
+                f"failed.\n\n{message}")
+            self._set_activity("Queue not started: backup failed.")
+            return
+
+        if policy == "auto":
+            self.bridge.set_batch_permission_mode("auto")
+        else:
+            normal = config.get(config.K_PERMISSION_MODE)
+            pause_mode = (
+                "ask_always" if normal == "ask_always" else "ask_destructive")
+            self.bridge.set_batch_permission_mode(pause_mode)
+
+        self._queue_running = True
+        self._queue_stop_requested = False
+        self._queue_pause_after_current = False
+        self._queue_started_at = time.monotonic()
+        self._queue_policy = policy
+        self._queue_backup = backup
+        self._queue_warning = (
+            "Project is unsaved - no file backup was possible." if not saved else "")
+        self._queue_auto_approvals = []
+        self._batch_task_ids = [task["id"] for task in queued]
+        self._history_append(
+            "queue", event="batch_started", policy=policy,
+            backup_path=backup["path"], warning=self._queue_warning,
+            task_ids=list(self._batch_task_ids))
+        note = f"Queue started ({policy}); backup: {backup['path']}"
+        if self._queue_warning:
+            note += ". " + self._queue_warning
+        self._add_status_note(note)
+        self._sync_queue_panel()
+        QTimer.singleShot(0, self._queue_idle_checkpoint)
+
+    def _choose_queue_policy(self, project_saved, project_dirty=False):
+        box = QMessageBox(self)
+        box.setWindowTitle("Run QGent queue")
+        box.setIcon(QMessageBox.Warning)
+        text = (
+            "QGent will create a project restore point, then run queued "
+            "requests one at a time in this chat session.\n\n"
+            "Choose how this batch handles destructive-operation approvals.")
+        if not project_saved:
+            text += ("\n\nProject is unsaved - no file backup is possible. "
+                     "Auto-approve is disabled.")
+        elif project_dirty:
+            text += ("\n\nThe project has unsaved changes. The backup will contain "
+                     "the last saved project file plus the current layer manifest.")
+        box.setText(text)
+        pause_button = box.addButton(
+            "Pause on approvals", QMessageBox.AcceptRole)
+        pause_button.setObjectName("QgentBatchPauseApprovals")
+        auto_button = box.addButton(
+            "Auto-approve destructive steps for this batch",
+            QMessageBox.AcceptRole)
+        auto_button.setObjectName("QgentBatchAutoApprove")
+        auto_button.setEnabled(bool(project_saved))
+        box.addButton(QMessageBox.Cancel)
+        box.exec_()
+        clicked = box.clickedButton()
+        if clicked is pause_button:
+            return "pause"
+        if clicked is auto_button and project_saved:
+            return "auto"
+        return None
+
+    @staticmethod
+    def _project_layer_manifest():
+        records = []
+        for layer in QgsProject.instance().mapLayers().values():
+            records.append({
+                "name": layer.name(),
+                "id": layer.id(),
+                "source": layer.source(),
+                "provider": layer.providerType(),
+            })
+        return records
+
+    def _start_turn(self, text, queue_task=None):
+        text = str(text or "").strip()
+        if not text:
+            return False
         if self.backend is None:
-            return
+            if queue_task is not None:
+                self._mark_queue_task(
+                    queue_task, "failed", "Backend is unavailable.")
+                QTimer.singleShot(0, self._queue_idle_checkpoint)
+            return False
         if self.backend.is_busy():
-            self._set_activity("Still working — press Stop to interrupt.")
-            return
+            return False
         if not self.backend.cli_path:
-            self._add_error(
-                "No CLI found. Install the Claude Code CLI "
-                "(`npm i -g @anthropic-ai/claude-code`) and log in, then set its "
-                "path in ⚙ Settings.")
-            return
+            message = (
+                "No CLI found. Install the selected agent CLI and log in, "
+                "then set its path in Settings.")
+            self._add_error(message)
+            if queue_task is not None:
+                self._mark_queue_task(queue_task, "failed", message)
+                QTimer.singleShot(0, self._queue_idle_checkpoint)
+            return False
 
         selection = self._capture_layer_selection()
         marker = text.split(maxsplit=1)[0].upper()
@@ -783,7 +1048,8 @@ class ChatDock(QDockWidget):
                       "backend": backend,
                       "model": config.get(config.K_MODEL_SUPERVISOR) if backend == "claude" else ""}
         self._history_update_session()
-        self.input.clear()
+        if queue_task is None:
+            self.input.clear()
         self._add_user_message(text, selection["tags"])
         self._current_bubble = None
         self._last_tool_chip = None
@@ -805,20 +1071,227 @@ class ChatDock(QDockWidget):
             "context_block": context_block,
             "resumed": bool(self.backend.session_id),
             "fallback_attempted": False,
+            "queue_task_id": queue_task.get("id") if queue_task else None,
         }
-        self.backend.send(text, context_block)
-
-    def on_stop(self):
-        if self.backend is not None:
-            self.backend.cancel()
-            self._end_stream()
-            self._hide_thinking()
-            self._set_activity("Stopped.")
-            self._add_status_note("Turn stopped.")
+        if queue_task is not None:
+            queue_task["status"] = "running"
+            queue_task["started_at"] = time.monotonic()
+            queue_task["elapsed_s"] = None
+            queue_task["error"] = ""
+            self._history_append(
+                "queue", event="task_started", task_id=queue_task["id"],
+                text=queue_task["text"])
+            self._sync_queue_panel()
+        try:
+            self.backend.send(text, context_block)
+            return True
+        except Exception as exc:
+            message = f"{type(exc).__name__}: {exc}"
             self._active_turn = None
             self._finish_perf()
+            self._add_error(message)
+            if queue_task is not None:
+                self._mark_queue_task(queue_task, "failed", message)
+                QTimer.singleShot(0, self._queue_idle_checkpoint)
+            return False
+
+    def _mark_queue_task(self, task, status, error=""):
+        if task is None:
+            return
+        task["status"] = str(status)
+        task["error"] = str(error or "")
+        if status in ("done", "failed", "skipped"):
+            started = task.get("started_at")
+            if started is not None:
+                task["elapsed_s"] = round(
+                    max(0.0, time.monotonic() - float(started)), 3)
+            task["ended_at"] = datetime.datetime.now().astimezone().isoformat(
+                timespec="milliseconds")
+        self._history_append(
+            "queue", event=f"task_{status}", task_id=task.get("id"),
+            text=task.get("text", ""), elapsed_s=task.get("elapsed_s"),
+            error=task.get("error", ""))
+        self._sync_queue_panel()
+
+    def _queue_idle_checkpoint(self):
+        backend_busy = bool(self.backend is not None and self.backend.is_busy())
+        if self._ignore_next_terminal and self._active_turn is None and not backend_busy:
+            self._ignore_next_terminal = False
+        if not self._queue_running:
+            return
+        if backend_busy or self._active_turn is not None:
+            return
+        if self._queue_stop_requested:
+            self._finish_queue(stopped=True)
+            return
+        if self._queue_pause_after_current:
+            self._set_activity("Queue paused after the current task.")
+            return
+        batch_ids = set(self._batch_task_ids)
+        task = next((item for item in self._queue_tasks
+                     if item.get("id") in batch_ids
+                     and item.get("status") == "queued"), None)
+        if task is None:
+            self._finish_queue(stopped=False)
+            return
+        self._start_turn(task.get("text", ""), queue_task=task)
+
+    def _finish_queue(self, stopped=False):
+        if not self._queue_running:
+            return
+        if self.backend is not None and self.backend.is_busy():
+            return
+        if self.bridge is not None:
+            self.bridge.clear_batch_permission_mode()
+        wall_time = max(0.0, time.monotonic() - (
+            self._queue_started_at or time.monotonic()))
+        batch_ids = set(self._batch_task_ids)
+        tasks = [task for task in self._queue_tasks
+                 if task.get("id") in batch_ids]
+        rows = [{
+            "task_id": task.get("id"),
+            "text": task.get("text", ""),
+            "status": task.get("status", "queued"),
+            "elapsed_s": task.get("elapsed_s"),
+            "error": task.get("error", ""),
+        } for task in tasks]
+        failures = sum(1 for task in tasks if task.get("status") == "failed")
+        skipped = sum(1 for task in tasks if task.get("status") == "skipped")
+        policy = self._queue_policy or "pause"
+        backup_path = (self._queue_backup or {}).get("path", "")
+        summary = self._queue_summary_text(
+            rows, policy, backup_path, self._queue_warning, wall_time,
+            failures, skipped, self._queue_auto_approvals, stopped)
+        self._history_append(
+            "queue_summary", text=summary, policy=policy,
+            backup_path=backup_path, warning=self._queue_warning,
+            tasks=rows, failure_count=failures, skip_count=skipped,
+            wall_time_s=round(wall_time, 3), stopped=bool(stopped),
+            auto_approvals=list(self._queue_auto_approvals))
+        self._add_assistant_message(summary, persist=False)
+
+        self._queue_running = False
+        self._queue_pause_after_current = False
+        self._queue_stop_requested = False
+        self._queue_started_at = None
+        self._queue_policy = None
+        self._queue_backup = None
+        self._queue_warning = ""
+        self._queue_auto_approvals = []
+        self._batch_task_ids = []
+        self._sync_queue_panel()
+        self._set_activity("Queue stopped." if stopped else "Queue complete.")
+
+    @staticmethod
+    def _queue_summary_text(rows, policy, backup_path, warning, wall_time,
+                            failures, skipped, auto_approvals, stopped):
+        heading = "Queue stopped" if stopped else "Queue complete"
+        lines = [
+            f"**{heading}**",
+            f"- Approval policy: {policy}",
+            f"- Pre-run backup: `{backup_path}`",
+        ]
+        if warning:
+            lines.append(f"- Warning: {warning}")
+        lines.append("- Tasks:")
+        icons = {"done": "✓", "failed": "✕", "skipped": "↪",
+                 "queued": "⏸", "running": "▶"}
+        for index, row in enumerate(rows, 1):
+            status = row.get("status", "queued")
+            elapsed = row.get("elapsed_s")
+            elapsed_text = f"{float(elapsed):.1f}s" if elapsed is not None else "n/a"
+            text = " ".join(str(row.get("text") or "").split())[:60]
+            line = f"  {index}. {icons.get(status, '?')} {status} ({elapsed_text}) - {text}"
+            if row.get("error"):
+                line += f" — {row['error']}"
+            lines.append(line)
+        lines.extend([
+            f"- Failures: {failures}; skipped: {skipped}",
+            f"- Wall time: {wall_time:.1f}s",
+            f"- Auto-approved destructive operations: {len(auto_approvals)}",
+        ])
+        for index, approval in enumerate(auto_approvals, 1):
+            reasons = "; ".join(approval.get("reasons") or []) or "no scan reason"
+            lines.append(f"  {index}. {reasons}")
+        return "\n".join(lines)
+
+    def _stop_queue_task(self, task_id):
+        turn = self._active_turn or {}
+        if turn.get("queue_task_id") != task_id:
+            return
+        task = self._queue_task(task_id)
+        self._mark_queue_task(task, "failed", "Stopped by user.")
+        self._cancel_pending_approvals("Current queue task stopped")
+        busy = bool(self.backend is not None and self.backend.is_busy())
+        if busy:
+            self._ignore_next_terminal = True
+            self.backend.cancel()
+        self._end_stream()
+        self._hide_thinking()
+        self._active_turn = None
+        self._finish_perf()
+        self._set_activity("Current queue task stopped.")
+        QTimer.singleShot(0, self._queue_idle_checkpoint)
+
+    def stop_all_queue(self):
+        if not self._queue_running:
+            return
+        self._queue_stop_requested = True
+        self._history_append("queue", event="stop_all_requested")
+        if self.bridge is not None:
+            self.bridge.clear_batch_permission_mode()
+        self._cancel_pending_approvals("Queue stopped")
+        active_id = (self._active_turn or {}).get("queue_task_id")
+        for task in self._queue_tasks:
+            if task.get("status") == "queued" and task.get("id") in self._batch_task_ids:
+                self._mark_queue_task(task, "skipped", "Queue stopped.")
+        if active_id:
+            self._mark_queue_task(
+                self._queue_task(active_id), "failed", "Queue stopped.")
+        busy = bool(self.backend is not None and self.backend.is_busy())
+        if busy:
+            self._ignore_next_terminal = True
+            self.backend.cancel()
+        self._end_stream()
+        self._hide_thinking()
+        self._active_turn = None
+        self._finish_perf()
+        self._sync_queue_panel()
+        QTimer.singleShot(0, self._queue_idle_checkpoint)
+
+    def on_stop(self):
+        turn = self._active_turn or {}
+        task_id = turn.get("queue_task_id")
+        if task_id:
+            self._stop_queue_task(task_id)
+            return
+        if self.backend is not None and self.backend.is_busy():
+            self._cancel_pending_approvals("Turn stopped")
+            self._ignore_next_terminal = True
+            self.backend.cancel()
+        self._end_stream()
+        self._hide_thinking()
+        self._set_activity("Stopped.")
+        self._add_status_note("Turn stopped.")
+        self._active_turn = None
+        self._finish_perf()
 
     def new_session(self):
+        self._cancel_pending_approvals("New session started")
+        if self.bridge is not None:
+            self.bridge.clear_batch_permission_mode()
+        self._queue_running = False
+        self._queue_pause_after_current = False
+        self._queue_stop_requested = False
+        self._queue_started_at = None
+        self._queue_policy = None
+        self._queue_backup = None
+        self._queue_warning = ""
+        self._queue_auto_approvals = []
+        self._queue_tasks = []
+        self._batch_task_ids = []
+        self._ignore_next_terminal = False
+        self.queue_panel.clear()
         if self.history_store is not None:
             try:
                 self.history_store.delete()
@@ -844,6 +1317,9 @@ class ChatDock(QDockWidget):
         self._post_welcome()
 
     def open_settings(self):
+        if self._queue_running:
+            self._set_activity("Stop the running queue before changing settings.")
+            return
         dlg = SettingsDialog(self, doctor_context=self._doctor_context())
         busy_signal = self.backend.busy_changed if self.backend is not None else None
         if busy_signal is not None:
@@ -975,6 +1451,13 @@ class ChatDock(QDockWidget):
         self._history_update_session()
 
     def _on_done(self, _result):
+        if self._ignore_next_terminal:
+            self._ignore_next_terminal = False
+            self._end_stream(persist=False)
+            self._hide_thinking()
+            QTimer.singleShot(0, self._queue_idle_checkpoint)
+            return
+        turn = self._active_turn
         self._end_stream()
         self._hide_thinking()
         if self._last_tool_chip is not None:
@@ -1000,8 +1483,19 @@ class ChatDock(QDockWidget):
         self._set_activity("Ready.")
         self._active_turn = None
         self._finish_perf()
+        task_id = (turn or {}).get("queue_task_id")
+        if task_id:
+            self._mark_queue_task(self._queue_task(task_id), "done")
+            QTimer.singleShot(0, self._queue_idle_checkpoint)
 
     def _on_error(self, message):
+        if self._ignore_next_terminal:
+            self._ignore_next_terminal = False
+            self._end_stream(persist=False)
+            self._hide_thinking()
+            QTimer.singleShot(0, self._queue_idle_checkpoint)
+            return
+        turn = self._active_turn
         self._end_stream()
         self._hide_thinking()
         if self._should_retry_missing_session(message):
@@ -1018,6 +1512,11 @@ class ChatDock(QDockWidget):
         self._set_activity("Error.")
         self._active_turn = None
         self._finish_perf()
+        task_id = (turn or {}).get("queue_task_id")
+        if task_id:
+            self._mark_queue_task(
+                self._queue_task(task_id), "failed", str(message))
+            QTimer.singleShot(0, self._queue_idle_checkpoint)
 
     def _should_retry_missing_session(self, message):
         turn = self._active_turn
@@ -1065,11 +1564,13 @@ class ChatDock(QDockWidget):
             writer.writerow(row)
 
     def _on_busy_changed(self, busy):
-        self.action_btn.set_busy(busy)
+        self.action_btn.set_busy(bool(busy) or self._queue_running)
+        self.stop_turn_btn.setVisible(bool(busy) and not self._queue_running)
         if busy:
             self._show_thinking()
         else:
             self._hide_thinking()
+            QTimer.singleShot(0, self._queue_idle_checkpoint)
 
     def _on_backend_status_note(self, message):
         self._add_status_note(str(message))
@@ -1085,30 +1586,105 @@ class ChatDock(QDockWidget):
     # ======================================================================
     def on_approval_requested(self, ap):
         self._end_stream()
-        approval_id = secrets.token_hex(8)
+        approval_id = str(ap.get("approval_id") or secrets.token_hex(8))
         code = clipped_text(ap.get("code", ""))
         reasons = [clipped_text(reason, 1000)
                    for reason in (ap.get("reasons") or [])]
         card = ApprovalCard(code, reasons, self.t)
         self._approval_history[approval_id] = card
+        self._live_approvals[approval_id] = {"card": card, "payload": ap}
         self._history_append(
             "approval", event="requested", approval_id=approval_id,
             code=code, reasons=reasons)
 
+        task_id = (self._active_turn or {}).get("queue_task_id")
+        task = self._queue_task(task_id) if task_id else None
+        if self._queue_running and task is not None:
+            task["status"] = "waiting_approval"
+            self._history_append(
+                "queue", event="awaiting_approval", task_id=task_id,
+                reasons=reasons)
+            self._sync_queue_panel()
+            self._notify_batch_attention(
+                "approval", "QGent is waiting for a destructive-step approval.")
+
         def decide(approved):
+            if ap.get("cancelled") or ap["event"].is_set():
+                card.set_cancelled(
+                    ap.get("cancel_reason") or "This approval is no longer active.")
+                self._live_approvals.pop(approval_id, None)
+                return
             ap["approved"] = approved
             ap["event"].set()
             self._history_append(
                 "approval", event="decided", approval_id=approval_id,
                 code=code, reasons=reasons, approved=bool(approved))
+            self._live_approvals.pop(approval_id, None)
+            if task is not None and task.get("status") == "waiting_approval":
+                task["status"] = "running"
+                self._sync_queue_panel()
 
         card.decided.connect(decide)
         self._add_widget(card)
         card.attention()
 
+    def _cancel_pending_approvals(self, reason):
+        if self.bridge is not None:
+            self.bridge.cancel_pending_approvals(str(reason))
+        for approval_id, item in list(self._live_approvals.items()):
+            card = item.get("card")
+            if card is not None:
+                card.set_cancelled(reason)
+            self._history_append(
+                "approval", event="cancelled", approval_id=approval_id,
+                reason=str(reason))
+        self._live_approvals.clear()
+
+    def _on_approval_finished(self, payload):
+        approval_id = str(payload.get("approval_id") or "")
+        item = self._live_approvals.pop(approval_id, None)
+        if item is None or not payload.get("cancelled"):
+            return
+        reason = str(payload.get("reason") or "Approval is no longer active.")
+        card = item.get("card")
+        if card is not None:
+            card.set_cancelled(reason)
+        self._history_append(
+            "approval", event="cancelled", approval_id=approval_id,
+            reason=reason)
+
+    def _on_auto_approved(self, payload):
+        if not (self._queue_running and payload.get("batch_scoped")):
+            return
+        record = {
+            "code": clipped_text(payload.get("code", ""), 1000),
+            "reasons": [clipped_text(reason, 1000)
+                        for reason in (payload.get("reasons") or [])],
+        }
+        self._queue_auto_approvals.append(record)
+        self._history_append(
+            "queue", event="auto_approved", code=record["code"],
+            reasons=record["reasons"])
+
+    def _notify_batch_attention(self, kind, message):
+        """Goal 11 hook; Goal 12 extends this into native notifications."""
+        self._history_append(
+            "queue", event="attention", attention_kind=str(kind),
+            message=str(message))
+        self._set_activity(str(message))
+
     # ======================================================================
     # Message list helpers
     # ======================================================================
+    def _add_assistant_message(self, text, persist=True, timestamp=None):
+        bubble = MessageBubble("assistant", self.t)
+        self._add_widget(bubble)
+        if timestamp is not None:
+            bubble.set_timestamp(timestamp)
+        bubble.set_text(str(text))
+        if persist:
+            self._history_append("assistant", text=str(text))
+
     def _add_user_message(self, text, tags=None, persist=True, timestamp=None):
         bubble = MessageBubble("user", self.t)
         bubble.set_tags(tags)
@@ -1160,6 +1736,7 @@ class ChatDock(QDockWidget):
         self._subagent_chips.clear()
         self._subagent_history.clear()
         self._approval_history.clear()
+        self._live_approvals.clear()
         self._stream_buf = ""
 
     # ======================================================================
@@ -1212,6 +1789,10 @@ class ChatDock(QDockWidget):
     # Teardown
     # ======================================================================
     def shutdown(self):
+        self._cancel_pending_approvals("QGent closed")
+        if self.bridge is not None:
+            self.bridge.clear_batch_permission_mode()
+        self._queue_running = False
         if self._layer_selection_model is not None:
             try:
                 self._layer_selection_model.selectionChanged.disconnect(

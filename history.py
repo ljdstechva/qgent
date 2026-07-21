@@ -14,12 +14,113 @@ import json
 import logging
 import os
 from pathlib import Path
+import shutil
 import tempfile
 
 
 LOG = logging.getLogger("QGent.history")
 RESTORE_LIMIT = 500
 MAX_TEXT_CHARS = 4000
+
+
+def create_batch_backup(settings_dir, project_filename, layers, now=None):
+    """Create a profile-local restore point before a queued batch starts.
+
+    The helper is deliberately QGIS-free. ``layers`` is an iterable of plain
+    mappings supplied by the dock, which keeps this primitive usable in an
+    isolated test process. A saved ``.qgz``/``.qgs`` is copied alongside an
+    atomic manifest; an unsaved project produces the manifest only.
+    """
+    settings_root = Path(settings_dir).resolve()
+    backup_root = settings_root / "qgent" / "backups"
+    backup_root.mkdir(parents=True, exist_ok=True)
+
+    created = now or datetime.now().astimezone()
+    if not isinstance(created, datetime):
+        raise TypeError("now must be a datetime")
+    stamp = created.strftime("%Y%m%d-%H%M%S-%f")
+    target = backup_root / f"batch_{stamp}"
+    suffix = 1
+    while target.exists():
+        target = backup_root / f"batch_{stamp}-{suffix}"
+        suffix += 1
+
+    project_text = str(project_filename or "").strip()
+    project_path = Path(project_text).resolve() if project_text else None
+    if project_path is not None:
+        if project_path.suffix.lower() not in (".qgz", ".qgs"):
+            raise ValueError("Saved QGIS project must use .qgz or .qgs")
+        if not project_path.is_file():
+            raise FileNotFoundError(f"Saved QGIS project not found: {project_path}")
+
+    temp_dir = Path(tempfile.mkdtemp(prefix=target.name + ".tmp-", dir=backup_root))
+    try:
+        copied_name = ""
+        copied_sha256 = ""
+        if project_path is not None:
+            copied_name = project_path.name
+            copied_path = temp_dir / copied_name
+            shutil.copy2(project_path, copied_path)
+            copied_sha256 = _sha256(copied_path)
+
+        layer_records = []
+        for layer in layers or ():
+            item = dict(layer)
+            layer_records.append({
+                "name": str(item.get("name") or ""),
+                "id": str(item.get("id") or ""),
+                "source": str(item.get("source") or ""),
+                "provider": str(item.get("provider") or ""),
+            })
+        manifest = {
+            "schema_version": 1,
+            "kind": "qgent_batch_backup",
+            "created_at": created.astimezone().isoformat(timespec="milliseconds"),
+            "project_saved": project_path is not None,
+            "project_path": str(project_path) if project_path is not None else "",
+            "project_backup": copied_name,
+            "project_sha256": copied_sha256,
+            "layers": layer_records,
+        }
+        manifest_path = temp_dir / "manifest.json"
+        _atomic_write_json(manifest_path, manifest)
+        os.replace(temp_dir, target)
+        return {
+            "path": str(target),
+            "manifest_path": str(target / "manifest.json"),
+            "project_backup": str(target / copied_name) if copied_name else "",
+            "project_saved": project_path is not None,
+            "manifest": manifest,
+        }
+    except Exception:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise
+
+
+def _sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _atomic_write_json(path, payload):
+    path = Path(path)
+    fd, temp_name = tempfile.mkstemp(
+        prefix=path.name + ".", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, path)
+    finally:
+        try:
+            os.unlink(temp_name)
+        except FileNotFoundError:
+            pass
 
 
 def project_key(project_filename):

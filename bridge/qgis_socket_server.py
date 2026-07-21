@@ -33,6 +33,8 @@ _APPROVAL_TIMEOUT_S = 300
 class BridgeServer(QObject):
     execute_requested = pyqtSignal(object)   # -> MainThreadExecutor.handle
     approval_requested = pyqtSignal(object)  # -> ChatDock.on_approval_requested
+    approval_finished = pyqtSignal(object)   # closes timed-out/cancelled cards
+    auto_approved = pyqtSignal(object)       # destructive batch operation metadata
     activity = pyqtSignal(str)               # tool name, for the status line
 
     def __init__(self, token, parent=None):
@@ -42,6 +44,10 @@ class BridgeServer(QObject):
         self.port = None
         self._server = None
         self._thread = None
+        self._gate_lock = threading.RLock()
+        self._batch_permission_mode = None
+        self._pending_approvals = {}
+        self._approval_sequence = 0
 
     # -- lifecycle ----------------------------------------------------------
     def start(self):
@@ -54,6 +60,8 @@ class BridgeServer(QObject):
         return self.port
 
     def stop(self):
+        self.cancel_pending_approvals("QGent bridge stopped")
+        self.clear_batch_permission_mode()
         if self._server is not None:
             try:
                 self._server.shutdown()
@@ -61,6 +69,40 @@ class BridgeServer(QObject):
             except Exception:
                 pass
             self._server = None
+
+    # -- batch-scoped approval policy --------------------------------------
+    def set_batch_permission_mode(self, mode):
+        """Install a non-persistent permission override for one queue run."""
+        if mode not in ("auto", "ask_destructive", "ask_always"):
+            raise ValueError(f"Unsupported batch permission mode: {mode!r}")
+        with self._gate_lock:
+            self._batch_permission_mode = mode
+
+    def clear_batch_permission_mode(self):
+        with self._gate_lock:
+            previous = self._batch_permission_mode
+            self._batch_permission_mode = None
+        return previous
+
+    def effective_permission_mode(self):
+        with self._gate_lock:
+            override = self._batch_permission_mode
+        return override or config.get(config.K_PERMISSION_MODE)
+
+    def batch_permission_mode(self):
+        with self._gate_lock:
+            return self._batch_permission_mode
+
+    def cancel_pending_approvals(self, reason="operation cancelled"):
+        """Release every waiting bridge thread and make its card inert."""
+        with self._gate_lock:
+            pending = list(self._pending_approvals.values())
+            for approval in pending:
+                approval["cancelled"] = True
+                approval["cancel_reason"] = str(reason)
+                approval["approved"] = False
+                approval["event"].set()
+        return len(pending)
 
     # -- request handling (runs in a handler thread) ------------------------
     def check_token(self, token):
@@ -90,18 +132,53 @@ class BridgeServer(QObject):
     def _maybe_gate(self, code):
         """Return a denial string if the user rejects, else None to proceed."""
         reasons = safety.scan(code)
-        mode = config.get(config.K_PERMISSION_MODE)
+        with self._gate_lock:
+            override = self._batch_permission_mode
+        mode = override or config.get(config.K_PERMISSION_MODE)
         need = mode == "ask_always" or (mode == "ask_destructive" and reasons)
         if not need:
+            if mode == "auto" and reasons:
+                self.auto_approved.emit({
+                    "code": code,
+                    "reasons": list(reasons),
+                    "batch_scoped": override == "auto",
+                })
             return None
-        ap = {"code": code, "reasons": reasons,
-              "event": threading.Event(), "approved": None}
+        with self._gate_lock:
+            self._approval_sequence += 1
+            approval_id = f"bridge-{self._approval_sequence}"
+            ap = {
+                "approval_id": approval_id,
+                "code": code,
+                "reasons": reasons,
+                "event": threading.Event(),
+                "approved": None,
+                "cancelled": False,
+                "cancel_reason": "",
+            }
+            self._pending_approvals[approval_id] = ap
         self.approval_requested.emit(ap)
-        if not ap["event"].wait(timeout=_APPROVAL_TIMEOUT_S):
-            return "DENIED: approval timed out (no response from the user)."
-        if not ap["approved"]:
-            return "DENIED: the user declined to run this code."
-        return None
+        try:
+            if not ap["event"].wait(timeout=_APPROVAL_TIMEOUT_S):
+                ap["cancelled"] = True
+                ap["cancel_reason"] = "approval timed out"
+                ap["approved"] = False
+                ap["event"].set()
+                return "DENIED: approval timed out (no response from the user)."
+            if ap.get("cancelled"):
+                return "CANCELLED: " + (
+                    ap.get("cancel_reason") or "approval was cancelled") + "."
+            if not ap["approved"]:
+                return "DENIED: the user declined to run this code."
+            return None
+        finally:
+            with self._gate_lock:
+                self._pending_approvals.pop(approval_id, None)
+            self.approval_finished.emit({
+                "approval_id": approval_id,
+                "cancelled": bool(ap.get("cancelled")),
+                "reason": str(ap.get("cancel_reason") or ""),
+            })
 
 
 class _TokenTCPServer(socketserver.ThreadingTCPServer):
