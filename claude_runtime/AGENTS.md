@@ -90,6 +90,15 @@ REPORT BACK: evidence per item (layer names, counts, CRS, algorithm IDs,
 - Treat an empty output layer as a failure unless emptiness is explicitly the
   expected result.
 
+## Vicinity-map template
+
+For A4 landscape Philippine vicinity maps, read the bundled
+`vicinity-map-template` skill together with `cartography-print-layout` and
+`ph-environmental-maps`. Load `claude_runtime/assets/vicinity_a4_landscape.qpt`
+and fill its existing stable item IDs; do not rebuild the A4 layout or invent
+Prepared by credentials. Self-verify its complete checklist and call
+`stat_path` on the exported PDF.
+
 ## Maintenance sync contract
 
 This file is the Codex sibling of `CLAUDE.md`. Any change to the shared Goal

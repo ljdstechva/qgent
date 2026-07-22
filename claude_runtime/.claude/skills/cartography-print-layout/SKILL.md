@@ -9,6 +9,11 @@ description: >
 
 # Symbology & print layouts
 
+For an A4 landscape Philippine vicinity map, the Supervisor reads
+`vicinity-map-template` and includes its applicable recipe in the cartographer
+Task. Load its bundled QPT instead of constructing a new layout or title block;
+do not use `execute_pyqgis` merely to read the skill file.
+
 ## Single-symbol style
 ```python
 from qgis.PyQt.QtGui import QColor

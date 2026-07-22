@@ -9,6 +9,12 @@ description: >
 
 # Philippine environmental maps
 
+For a professional A4 landscape vicinity-map deliverable, the Supervisor reads
+`vicinity-map-template` and includes its applicable recipe in the cartographer
+Task; its bundled QPT, Philippines locator asset, credential gate, and
+verification checklist take precedence over the generic recipe here. A
+QGIS-only cartographer must not call `execute_pyqgis` to read the skill file.
+
 Context: the user is an environmental engineer / PCO in the Philippines
 preparing DENR-EMB compliance documents (EIA, ECC, WDP, etc.). Maps must look
 official and use standard elements.

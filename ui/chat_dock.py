@@ -1443,7 +1443,7 @@ class ChatDock(QDockWidget):
             return False
         if self.backend is None:
             if queue_task is not None:
-                self._stop_queue_after_error(
+                self._continue_queue_after_error(
                     queue_task, "Backend is unavailable.")
             return False
         if self.backend.is_busy():
@@ -1454,7 +1454,7 @@ class ChatDock(QDockWidget):
                 "then set its path in Settings.")
             self._add_error(message)
             if queue_task is not None:
-                self._stop_queue_after_error(queue_task, message)
+                self._continue_queue_after_error(queue_task, message)
             return False
 
         selection = self._capture_layer_selection()
@@ -1536,7 +1536,7 @@ class ChatDock(QDockWidget):
             self._finish_perf()
             self._add_error(message)
             if queue_task is not None:
-                self._stop_queue_after_error(queue_task, message)
+                self._continue_queue_after_error(queue_task, message)
             return False
 
     def _mark_queue_task(self, task, status, error=""):
@@ -1567,8 +1567,21 @@ class ChatDock(QDockWidget):
             return
         task.update(build_turn_report(turn, terminal_payload))
 
+    def _continue_queue_after_error(self, task, message):
+        """Fail one task, clean up its prompts, and continue this batch."""
+        error = str(message or "Agent backend error.")
+        self._mark_queue_task(task, "failed", error)
+        if not self._queue_running:
+            return
+        self._cancel_pending_questions("Queue task failed")
+        self._cancel_pending_approvals("Queue task failed")
+        self._history_append(
+            "queue", event="task_error_continuing",
+            task_id=(task or {}).get("id"), error=error)
+        QTimer.singleShot(0, self._queue_idle_checkpoint)
+
     def _stop_queue_after_error(self, task, message):
-        """Fail one terminally errored task and stop this batch at idle."""
+        """Fail one task and stop the batch after a fatal batch error."""
         error = str(message or "Agent backend error.")
         self._mark_queue_task(task, "failed", error)
         if not self._queue_running:
@@ -2034,7 +2047,7 @@ class ChatDock(QDockWidget):
         self._active_turn = None
         self._finish_perf()
         if task_id:
-            self._stop_queue_after_error(task, str(message))
+            self._continue_queue_after_error(task, str(message))
 
     def _should_retry_missing_session(self, message):
         turn = self._active_turn
