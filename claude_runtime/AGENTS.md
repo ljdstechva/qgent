@@ -95,9 +95,14 @@ REPORT BACK: evidence per item (layer names, counts, CRS, algorithm IDs,
 For A4 landscape Philippine vicinity maps, read the bundled
 `vicinity-map-template` skill together with `cartography-print-layout` and
 `ph-environmental-maps`. Load `claude_runtime/assets/vicinity_a4_landscape.qpt`
-and fill its existing stable item IDs; do not rebuild the A4 layout or invent
-Prepared by credentials. Self-verify its complete checklist and call
-`stat_path` on the exported PDF.
+and fill its 56 stable v2 item IDs; do not rebuild the A4 layout, add a second
+north arrow, invent a project title, or invent Prepared by credentials. A
+missing `project_title` is a required Goal 16 QuestionCard. Generate the site
+coordinate line from numeric inputs with
+`qgis_chat_agent.vicinity_text.format_coordinate_pair`, then run
+`assert_layout_unicode` before export. Self-verify all 16 v2 checklist items,
+including adaptive no-empty-cell title blocks, subtle cross ticks, compact
+panels, and exactly one arrow, and call `stat_path` on the exported PDF.
 
 ## Maintenance sync contract
 

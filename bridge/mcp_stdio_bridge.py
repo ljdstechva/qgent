@@ -11,10 +11,29 @@ Connection details come from the environment (written by the plugin at session
 start):
     QGIS_COPILOT_HOST, QGIS_COPILOT_PORT, QGIS_COPILOT_TOKEN
 """
+
 import json
 import os
 import socket
 import sys
+
+
+def _configure_utf8_stdio():
+    """Decode MCP pipe bytes as UTF-8 regardless of the Windows ANSI locale.
+
+    Codex emits raw Unicode in JSON-RPC tool arguments.  A pipe-backed Python
+    process on Windows can otherwise decode those UTF-8 bytes as cp1252 before
+    ``json.loads`` sees them (for example U+00B0 becomes U+00C2 U+00B0).
+    Reconfigure before the first read so the model payload stays Unicode.
+    """
+    for stream_name in ("stdin", "stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8", errors="strict")
+
+
+_configure_utf8_stdio()
 
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_NAME = "qgis"
