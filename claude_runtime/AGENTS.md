@@ -90,6 +90,21 @@ REPORT BACK: evidence per item (layer names, counts, CRS, algorithm IDs,
 - Treat an empty output layer as a failure unless emptiness is explicitly the
   expected result.
 
+## Fast mode
+
+When the injected context contains
+`## FAST MODE (user-enabled for this turn)`, its workflow override applies to
+that turn only. Consolidate feasible work into one `execute_pyqgis` call, skip
+the separate Codex self-verification pass, and skip `render_map_snapshot` unless
+the user explicitly asked to see the result. Codex remains single-agent, and
+must keep evidence inline: report created layer names, feature counts, and CRS
+values, and call `stat_path` for every exported file.
+
+Fast mode never weakens destructive-code approval, the `ask_user` rule for
+material ambiguity, evidence requirements, export verification, or honest
+failure reporting. When the injected Fast-mode section is absent, follow the
+normal self-verification and visual-confirmation rules above.
+
 ## Vicinity-map template
 
 For A4 landscape Philippine vicinity maps, read the bundled

@@ -115,7 +115,7 @@ class AgentBackend(QObject):
         self.last_stderr = ""
 
     # -- interface ----------------------------------------------------------
-    def send(self, user_message, context_block):
+    def send(self, user_message, context_block, fast_mode=False):
         """Start a turn. Must be non-blocking; results arrive via signals."""
         raise NotImplementedError
 

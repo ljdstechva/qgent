@@ -129,6 +129,21 @@ the work yourself, but still write the Goal Contract and, before declaring done,
 run an explicit **self-verification pass** — re-read the live project with the
 tools and check each DoD item with evidence, exactly as qa-verifier would.
 
+## Fast mode
+
+When the injected context contains
+`## FAST MODE (user-enabled for this turn)`, its workflow override applies to
+that turn only. Consolidate feasible work into one `execute_pyqgis` call, do not
+dispatch subagents or `qa-verifier`, and skip `render_map_snapshot` unless the
+user explicitly asked to see the result. Keep evidence inline: report created
+layer names, feature counts, and CRS values, and call `stat_path` for every
+exported file.
+
+Fast mode never weakens destructive-code approval, the `ask_user` rule for
+material ambiguity, evidence requirements, export verification, or honest
+failure reporting. When the injected Fast-mode section is absent, follow the
+normal delegation, verification, and visual-confirmation rules above.
+
 ## Maintenance sync contract
 
 `AGENTS.md` is this file's Codex-facing sibling. Any change to the shared Goal

@@ -31,6 +31,12 @@ from .animations import (
 
 _CARET = "▍"
 
+FAST_MODE_TOOLTIP = (
+    "Fast mode: lowest latency — skips independent verification and visual "
+    "confirmations. Approvals and clarifying questions still apply. Not "
+    "recommended for final compliance deliverables."
+)
+
 
 def _now():
     return datetime.now().strftime("%H:%M")
@@ -1165,6 +1171,21 @@ class ChatInput(QPlainTextEdit):
     def _grow(self):
         h = int(self.document().size().height()) + 14
         self.setFixedHeight(max(36, min(h, 120)))
+
+
+class FastModeButton(QPushButton):
+    """Compact persisted toggle for the next direct turn."""
+
+    def __init__(self, tokens, parent=None):
+        super().__init__("⚡", parent)
+        self.t = tokens
+        self.setObjectName("QgentFastMode")
+        self.setCheckable(True)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip(FAST_MODE_TOOLTIP)
+        self.setStatusTip(FAST_MODE_TOOLTIP)
+        self.setAccessibleName("Fast mode")
+        self.setAccessibleDescription(FAST_MODE_TOOLTIP)
 
 
 class SendStopButton(QPushButton):

@@ -31,6 +31,7 @@ def build_turn_report(turn, terminal_payload=None):
     files = _exported_files(tools, assistant_text)
     verdict = _qa_verdict(assistant_text, events)
     return {
+        "fast": state.get("fast") is True,
         "usage": usage,
         "tokens": tokens,
         "verdict": verdict,
@@ -61,7 +62,8 @@ def batch_token_totals(rows):
 
 
 def render_batch_summary(rows, policy, backup_path, warning, wall_time,
-                         auto_approvals, stopped=False, stop_reason=""):
+                         auto_approvals, stopped=False, stop_reason="",
+                         fast_mode=False):
     """Render one durable assistant-style Markdown audit record."""
     records = [dict(row) for row in (rows or [])]
     reason = str(stop_reason or "")
@@ -106,6 +108,7 @@ def render_batch_summary(rows, policy, backup_path, warning, wall_time,
     lines.extend([
         "",
         "- Approval policy: {}".format(_markdown_text(policy or "pause")),
+        "- Fast mode: {}".format("ON" if fast_mode is True else "OFF"),
         "- Pre-run backup: `{}`".format(_markdown_code(backup_path)),
     ])
     if warning:

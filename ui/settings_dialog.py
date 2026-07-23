@@ -14,6 +14,7 @@ from .. import config
 from ..doctor import DoctorService, DoctorWorker, repair_model_options
 from ..doctor_core import (
     ensure_recovery_entrypoint, launch_detached, write_doctor_request)
+from .widgets import FAST_MODE_TOOLTIP
 
 
 class SettingsDialog(QDialog):
@@ -100,6 +101,9 @@ class SettingsDialog(QDialog):
         for label, preset in config.model_preset_options():
             self.model_preset.addItem(label, preset)
         mform.addRow("Preset", self.model_preset)
+        self.fast_mode = QCheckBox("Use Fast mode for new turns")
+        self.fast_mode.setToolTip(FAST_MODE_TOOLTIP)
+        mform.addRow("Fast mode", self.fast_mode)
 
         self.models_advanced_toggle = QToolButton()
         self.models_advanced_toggle.setText("Advanced")
@@ -478,6 +482,7 @@ class SettingsDialog(QDialog):
         pidx = self.perm.findData(config.get(config.K_PERMISSION_MODE))
         self.perm.setCurrentIndex(max(0, pidx))
         self.verifier.setChecked(config.get(config.K_VERIFIER))
+        self.fast_mode.setChecked(config.get(config.K_FAST_MODE))
         self.timeout.setValue(config.get(config.K_EXEC_TIMEOUT))
         self.max_result.setValue(config.get(config.K_MAX_RESULT))
         self.show_map_snapshots.setChecked(
@@ -518,6 +523,7 @@ class SettingsDialog(QDialog):
                 legacy_key, self._model_memory[backend_kind][role]["model_id"])
         config.set(config.K_PERMISSION_MODE, self.perm.currentData())
         config.set(config.K_VERIFIER, self.verifier.isChecked())
+        config.set(config.K_FAST_MODE, self.fast_mode.isChecked())
         config.set(config.K_EXEC_TIMEOUT, self.timeout.value())
         config.set(config.K_MAX_RESULT, self.max_result.value())
         config.set(

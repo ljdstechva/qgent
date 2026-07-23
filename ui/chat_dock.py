@@ -31,7 +31,7 @@ from qgis.PyQt.QtGui import QIcon, QImage
 from qgis.PyQt.QtWidgets import (
     QDockWidget, QWidget, QVBoxLayout, QHBoxLayout, QScrollArea, QLabel,
     QToolButton, QFrame, QMenu, QFileDialog, QMessageBox, QApplication,
-    QPushButton, QSystemTrayIcon,
+    QPushButton, QSystemTrayIcon, QCheckBox,
 )
 from qgis.core import (
     Qgis, QgsApplication, QgsLayerTreeGroup, QgsLayerTreeLayer, QgsMessageLog,
@@ -44,13 +44,14 @@ from .animations import fade_in, smooth_scroll_to_bottom, staggered, ThinkingDot
 from .widgets import (
     MessageBubble, ToolChip, SubagentChip, ApprovalCard, ChatInput,
     SendStopButton, SuggestionChip, ContextStrip, StatusNote, QueuePanel,
-    SnapshotCard, QuestionCard,
+    SnapshotCard, QuestionCard, FastModeButton,
 )
 from .settings_dialog import SettingsDialog
 from ..bridge.qgis_socket_server import BridgeServer
 from ..bridge.main_thread_executor import MainThreadExecutor
 from ..context.project_snapshot import (
-    build_attached_files_section, build_context_block, snapshot_layer,
+    build_attached_files_section, build_context_block,
+    build_fast_mode_directive, snapshot_layer,
 )
 from ..history import (
     HistoryStore, bounded_json_value, clipped_text, create_batch_backup,
@@ -227,6 +228,7 @@ class ChatDock(QDockWidget):
         self._queue_stop_requested = False
         self._queue_started_at = None
         self._queue_policy = None
+        self._queue_fast_mode = None
         self._queue_backup = None
         self._queue_warning = ""
         self._queue_auto_approvals = []
@@ -341,6 +343,10 @@ class ChatDock(QDockWidget):
         self.status = QLabel("")
         arow.addWidget(self.status)
         arow.addStretch(1)
+        self.fast_indicator = QLabel("⚡ FAST")
+        self.fast_indicator.setObjectName("QgentFastIndicator")
+        self.fast_indicator.setToolTip("Fast mode is active.")
+        arow.addWidget(self.fast_indicator)
         outer.addWidget(activity)
 
         # -- sequential task queue ----------------------------------------
@@ -382,12 +388,17 @@ class ChatDock(QDockWidget):
         self.stop_turn_btn.clicked.connect(self.on_stop)
         self.stop_turn_btn.hide()
         crow.addWidget(self.stop_turn_btn, 0, Qt.AlignBottom)
+        self.fast_mode_btn = FastModeButton(self.t)
+        self.fast_mode_btn.setChecked(bool(config.get(config.K_FAST_MODE)))
+        self.fast_mode_btn.toggled.connect(self._on_fast_mode_toggled)
+        crow.addWidget(self.fast_mode_btn, 0, Qt.AlignBottom)
         self.action_btn = SendStopButton(self.t)
         self.action_btn.clicked.connect(self._on_action_clicked)
         crow.addWidget(self.action_btn, 0, Qt.AlignBottom)
         outer.addWidget(composer)
 
         self.setWidget(root)
+        self._sync_fast_mode_ui()
 
     def _set_composer_focus(self, composer, on):
         composer.setProperty("focused", "true" if on else "false")
@@ -395,6 +406,23 @@ class ChatDock(QDockWidget):
 
     def focus_input(self):
         self.input.setFocus()
+
+    def _on_fast_mode_toggled(self, enabled):
+        config.set(config.K_FAST_MODE, bool(enabled))
+        self._sync_fast_mode_ui()
+
+    def _sync_fast_mode_ui(self):
+        enabled = bool(config.get(config.K_FAST_MODE))
+        if hasattr(self, "fast_mode_btn"):
+            self.fast_mode_btn.blockSignals(True)
+            self.fast_mode_btn.setChecked(enabled)
+            self.fast_mode_btn.blockSignals(False)
+        if hasattr(self, "fast_indicator"):
+            indicator_enabled = (
+                bool(self._queue_fast_mode)
+                if self._queue_running and self._queue_fast_mode is not None
+                else enabled)
+            self.fast_indicator.setVisible(indicator_enabled)
 
     # -- file drops --------------------------------------------------------
     def dragEnterEvent(self, event):
@@ -560,7 +588,7 @@ class ChatDock(QDockWidget):
                 continue
         return items
 
-    def _selected_layer_snapshots(self):
+    def _selected_layer_snapshots(self, include_feature_count=True):
         view = self._layer_tree_view
         if view is None:
             return []
@@ -575,14 +603,15 @@ class ChatDock(QDockWidget):
         snapshots = []
         seen = set()
         for layer in layers:
-            item = snapshot_layer(layer)
+            item = snapshot_layer(
+                layer, include_feature_count=include_feature_count)
             if item is None or item["id"] in seen:
                 continue
             seen.add(item["id"])
             snapshots.append(item)
         return snapshots
 
-    def _capture_layer_selection(self):
+    def _capture_layer_selection(self, include_feature_count=True):
         """Freeze one send-time snapshot shared by tags and grounding."""
         chips = self._selection_chip_items()
         tags = []
@@ -595,7 +624,8 @@ class ChatDock(QDockWidget):
         return {
             "chips": tuple(dict(item) for item in chips),
             "tags": tuple(tags),
-            "layers": tuple(dict(item) for item in self._selected_layer_snapshots()),
+            "layers": tuple(dict(item) for item in self._selected_layer_snapshots(
+                include_feature_count=include_feature_count)),
         }
 
     def _update_layer_context_strip(self):
@@ -862,6 +892,8 @@ class ChatDock(QDockWidget):
         if turn is None or turn.get("terminal_snapshot_attempted"):
             return None
         turn["terminal_snapshot_attempted"] = True
+        if turn.get("fast"):
+            return None
         if (not turn.get("visual_change_tool_ran")
                 or not self._snapshots_enabled()):
             return None
@@ -929,7 +961,8 @@ class ChatDock(QDockWidget):
                 if kind == "user":
                     self._add_user_message(
                         self._record_text(record, "text"),
-                        record.get("tags") or [], persist=False, timestamp=stamp)
+                        record.get("tags") or [], persist=False,
+                        timestamp=stamp, fast=bool(record.get("fast")))
                 elif kind == "assistant":
                     text = self._record_text(record, "text")
                     if record.get("style") == "status":
@@ -1337,9 +1370,16 @@ class ChatDock(QDockWidget):
         project = QgsProject.instance()
         project_path = str(project.fileName() or "")
         saved = bool(project_path)
-        policy = self._choose_queue_policy(saved, bool(project.isDirty()))
-        if policy is None:
+        choice = self._choose_queue_policy(saved, bool(project.isDirty()))
+        if choice is None:
             return
+        if isinstance(choice, tuple):
+            policy, batch_fast = choice
+        else:
+            # Compatibility with harnesses/extensions that override the
+            # pre-Fast-mode policy chooser and return only a policy string.
+            policy = choice
+            batch_fast = bool(config.get(config.K_FAST_MODE))
         if policy == "auto" and not saved:
             self._history_append(
                 "queue", event="auto_rejected_unsaved",
@@ -1375,6 +1415,7 @@ class ChatDock(QDockWidget):
         self._queue_pause_after_current = False
         self._queue_started_at = time.monotonic()
         self._queue_policy = policy
+        self._queue_fast_mode = bool(batch_fast)
         self._queue_backup = backup
         self._queue_warning = (
             "Project is unsaved - no file backup was possible." if not saved else "")
@@ -1382,11 +1423,16 @@ class ChatDock(QDockWidget):
         self._batch_task_ids = [task["id"] for task in queued]
         self._queue_stop_reason = ""
         self._queue_stop_error = ""
+        self._sync_fast_mode_ui()
         self._history_append(
             "queue", event="batch_started", policy=policy,
+            fast=bool(self._queue_fast_mode),
             backup_path=backup["path"], warning=self._queue_warning,
             task_ids=list(self._batch_task_ids))
-        note = f"Queue started ({policy}); backup: {backup['path']}"
+        mode_label = "Fast" if self._queue_fast_mode else "Normal"
+        note = (
+            f"Queue started ({policy}, {mode_label} mode); "
+            f"backup: {backup['path']}")
         if self._queue_warning:
             note += ". " + self._queue_warning
         self._add_status_note(note)
@@ -1416,13 +1462,17 @@ class ChatDock(QDockWidget):
             QMessageBox.AcceptRole)
         auto_button.setObjectName("QgentBatchAutoApprove")
         auto_button.setEnabled(bool(project_saved))
+        fast_checkbox = QCheckBox("Run this batch in Fast mode")
+        fast_checkbox.setObjectName("QgentBatchFastMode")
+        fast_checkbox.setChecked(bool(config.get(config.K_FAST_MODE)))
+        box.setCheckBox(fast_checkbox)
         box.addButton(QMessageBox.Cancel)
         box.exec_()
         clicked = box.clickedButton()
         if clicked is pause_button:
-            return "pause"
+            return "pause", fast_checkbox.isChecked()
         if clicked is auto_button and project_saved:
-            return "auto"
+            return "auto", fast_checkbox.isChecked()
         return None
 
     @staticmethod
@@ -1457,7 +1507,12 @@ class ChatDock(QDockWidget):
                 self._continue_queue_after_error(queue_task, message)
             return False
 
-        selection = self._capture_layer_selection()
+        if queue_task is not None and self._queue_fast_mode is not None:
+            fast = bool(self._queue_fast_mode)
+        else:
+            fast = bool(config.get(config.K_FAST_MODE))
+        selection = self._capture_layer_selection(
+            include_feature_count=not fast)
         if queue_task is None:
             attachments = self._attachment_snapshot()
         else:
@@ -1477,7 +1532,7 @@ class ChatDock(QDockWidget):
         if queue_task is None:
             self.input.clear()
         self._add_user_message(
-            text, message_tags, attachments=attachments)
+            text, message_tags, attachments=attachments, fast=fast)
         self._current_bubble = None
         self._last_tool_chip = None
         self._last_tool_id = None
@@ -1491,9 +1546,14 @@ class ChatDock(QDockWidget):
         try:
             context_block = build_context_block(
                 self.iface, selected_layers=selection["layers"],
-                attached_files=attachments)
+                attached_files=attachments, fast_mode=fast)
         except Exception:
             context_block = build_attached_files_section(attachments)
+            if fast:
+                context_block = "\n\n".join(
+                    part for part in (
+                        context_block, build_fast_mode_directive())
+                    if part)
         self._active_turn = {
             "id": secrets.token_hex(12),
             "text": text,
@@ -1505,6 +1565,7 @@ class ChatDock(QDockWidget):
             "tool_reports": [],
             "subagent_events": [],
             "attachments": [dict(item) for item in attachments],
+            "fast": fast,
             "visual_change_tool_ran": False,
             "terminal_snapshot_attempted": False,
             "explicit_snapshot_fingerprints": set(),
@@ -1520,13 +1581,14 @@ class ChatDock(QDockWidget):
             queue_task["verdict"] = ""
             queue_task["layers_created"] = []
             queue_task["files_exported"] = []
+            queue_task["fast"] = fast
             self._history_append(
                 "queue", event="task_started", task_id=queue_task["id"],
-                text=queue_task["text"],
+                text=queue_task["text"], fast=fast,
                 attachments=bounded_json_value(list(attachments)))
             self._sync_queue_panel()
         try:
-            self.backend.send(text, context_block)
+            self.backend.send(text, context_block, fast_mode=fast)
             if queue_task is None:
                 self._consume_attached_files(attachments)
             return True
@@ -1557,6 +1619,7 @@ class ChatDock(QDockWidget):
             text=task.get("text", ""), elapsed_s=task.get("elapsed_s"),
             error=task.get("error", ""), usage=task.get("usage"),
             tokens=task.get("tokens"), verdict=task.get("verdict", ""),
+            fast=bool(task.get("fast")),
             layers_created=list(task.get("layers_created") or []),
             files_exported=list(task.get("files_exported") or []))
         self._sync_queue_panel()
@@ -1649,6 +1712,7 @@ class ChatDock(QDockWidget):
             "usage": task.get("usage"),
             "tokens": task.get("tokens"),
             "verdict": task.get("verdict", ""),
+            "fast": bool(task.get("fast")),
             "layers_created": list(task.get("layers_created") or []),
             "files_exported": list(task.get("files_exported") or []),
         } for task in tasks]
@@ -1660,12 +1724,14 @@ class ChatDock(QDockWidget):
         backup_path = (self._queue_backup or {}).get("path", "")
         stop_reason = self._queue_stop_reason
         stop_error = self._queue_stop_error
+        batch_fast = bool(self._queue_fast_mode)
         summary = self._queue_summary_text(
             rows, policy, backup_path, self._queue_warning, wall_time,
             failures, skipped, self._queue_auto_approvals, stopped,
-            stop_reason=stop_reason)
+            stop_reason=stop_reason, fast_mode=batch_fast)
         self._history_append(
             "queue_summary", text=summary, policy=policy,
+            fast=batch_fast,
             backup_path=backup_path, warning=self._queue_warning,
             tasks=rows, failure_count=failures, skip_count=skipped,
             pass_count=passed, total_tokens=total_tokens,
@@ -1680,12 +1746,14 @@ class ChatDock(QDockWidget):
         self._queue_stop_requested = False
         self._queue_started_at = None
         self._queue_policy = None
+        self._queue_fast_mode = None
         self._queue_backup = None
         self._queue_warning = ""
         self._queue_auto_approvals = []
         self._batch_task_ids = []
         self._queue_stop_reason = ""
         self._queue_stop_error = ""
+        self._sync_fast_mode_ui()
         self._sync_queue_panel()
         self._set_activity("Queue stopped." if stopped else "Queue complete.")
         if stopped and stop_reason == "error":
@@ -1702,11 +1770,12 @@ class ChatDock(QDockWidget):
     @staticmethod
     def _queue_summary_text(rows, policy, backup_path, warning, wall_time,
                             failures, skipped, auto_approvals, stopped,
-                            stop_reason=""):
+                            stop_reason="", fast_mode=False):
         del failures, skipped  # Counts are derived from the immutable rows.
         return render_batch_summary(
             rows, policy, backup_path, warning, wall_time, auto_approvals,
-            stopped=stopped, stop_reason=stop_reason)
+            stopped=stopped, stop_reason=stop_reason,
+            fast_mode=fast_mode)
 
     def _stop_queue_task(self, task_id):
         turn = self._active_turn or {}
@@ -1784,6 +1853,7 @@ class ChatDock(QDockWidget):
         self._queue_stop_requested = False
         self._queue_started_at = None
         self._queue_policy = None
+        self._queue_fast_mode = None
         self._queue_backup = None
         self._queue_warning = ""
         self._queue_auto_approvals = []
@@ -1792,6 +1862,7 @@ class ChatDock(QDockWidget):
         self._ignore_next_terminal = False
         self._queue_stop_reason = ""
         self._queue_stop_error = ""
+        self._sync_fast_mode_ui()
         self.queue_panel.clear()
         if self.history_store is not None:
             try:
@@ -1840,6 +1911,7 @@ class ChatDock(QDockWidget):
             self._write_mcp_config()
             self._build_backend()
             self._history_update_session()
+            self._sync_fast_mode_ui()
             self._set_activity("Settings applied.")
 
     # ======================================================================
@@ -1875,7 +1947,9 @@ class ChatDock(QDockWidget):
         if bubble is not None:
             bubble.set_streaming(False)
             if persist and bubble.text():
-                self._history_append("assistant", text=bubble.text())
+                self._history_append(
+                    "assistant", text=bubble.text(),
+                    fast=bool((self._active_turn or {}).get("fast")))
         self._current_bubble = None
 
     # ======================================================================
@@ -2074,7 +2148,9 @@ class ChatDock(QDockWidget):
         turn = self._active_turn
         if turn is None or self.backend is None or self.backend.is_busy():
             return
-        self.backend.send(turn["text"], turn["context_block"])
+        self.backend.send(
+            turn["text"], turn["context_block"],
+            fast_mode=bool(turn.get("fast")))
 
     def _finish_perf(self):
         turn = self._perf
@@ -2383,11 +2459,13 @@ class ChatDock(QDockWidget):
         # assistant card visible after it has a measured document height.
         bubble.show()
         if persist:
-            self._history_append("assistant", text=str(text))
+            self._history_append(
+                "assistant", text=str(text),
+                fast=bool((self._active_turn or {}).get("fast")))
         return bubble
 
     def _add_user_message(self, text, tags=None, attachments=None,
-                          persist=True, timestamp=None):
+                          persist=True, timestamp=None, fast=False):
         bubble = MessageBubble("user", self.t)
         bubble.set_tags(tags)
         self._add_widget(bubble)
@@ -2397,7 +2475,8 @@ class ChatDock(QDockWidget):
         if persist:
             self._history_append(
                 "user", text=str(text), tags=list(tags or []),
-                attachments=bounded_json_value(list(attachments or [])))
+                attachments=bounded_json_value(list(attachments or [])),
+                fast=bool(fast))
 
     def _add_error(self, text, persist=True, timestamp=None):
         bubble = MessageBubble("assistant", self.t)
@@ -2407,7 +2486,9 @@ class ChatDock(QDockWidget):
             bubble.set_timestamp(timestamp)
         bubble.set_text("**⚠ " + text + "**")
         if persist:
-            self._history_append("error", text=str(text))
+            self._history_append(
+                "error", text=str(text),
+                fast=bool((self._active_turn or {}).get("fast")))
 
     def _add_status_note(self, text, persist=True):
         note = StatusNote(text, self.t)

@@ -126,8 +126,9 @@ def render_markdown(records, metadata, exported_at=None, in_progress=False):
     for index, record in enumerate(records):
         kind = str(record.get("kind") or "")
         stamp = _clock(record.get("t"))
+        fast_marker = " ⚡" if record.get("fast") is True else ""
         if kind == "user":
-            lines.extend(["**You** - {}".format(stamp), ""])
+            lines.extend(["**You**{} - {}".format(fast_marker, stamp), ""])
             tags = record.get("tags") or []
             if tags:
                 lines.extend([
@@ -137,7 +138,7 @@ def render_markdown(records, metadata, exported_at=None, in_progress=False):
         elif kind == "assistant":
             role = "QGent status" if record.get("style") == "status" else "QGent"
             lines.extend([
-                "**{}** - {}".format(role, stamp), "",
+                "**{}**{} - {}".format(role, fast_marker, stamp), "",
                 _stored_text(record.get("text", "")), "", "---", "",
             ])
         elif kind == "error":
@@ -205,7 +206,8 @@ def render_markdown(records, metadata, exported_at=None, in_progress=False):
             lines.extend(["", "---", ""])
         elif kind == "queue_summary":
             lines.extend([
-                "**QGent batch summary** - {}".format(stamp), "",
+                "**QGent batch summary**{} - {}".format(
+                    fast_marker, stamp), "",
                 _stored_text(record.get("text", "")), "", "---", "",
             ])
         elif kind == "snapshot":

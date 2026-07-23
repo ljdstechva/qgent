@@ -272,6 +272,16 @@ QPushButton#QgentQueueRun, QPushButton#QgentSendAction {{
 QPushButton#QgentQueueRun:hover, QPushButton#QgentSendAction:hover {{
     background: {t.accent2};
 }}
+QPushButton#QgentFastMode {{
+    color: {t.accent}; background: transparent; border: 1px solid {t.accent};
+    border-radius: 7px; padding: 5px 8px; font-weight: 700;
+}}
+QPushButton#QgentFastMode:hover {{
+    color: {t.accent2}; border-color: {t.accent2};
+}}
+QPushButton#QgentFastMode:checked {{
+    color: #FFFFFF; background: {t.accent}; border-color: {t.accent};
+}}
 QPushButton#QgentQueueSecondary, QPushButton#QgentQueueStop,
 QPushButton#QgentQueueAdd, QPushButton#QgentStopCurrent {{
     color: {t.text_muted}; background: transparent; border: 1px solid {t.border};
@@ -295,6 +305,10 @@ QPushButton:disabled {{ color: {t.text_muted}; background: {t.surface_hi}; }}
 
 /* ---- activity strip ---- */
 #QgentActivity QLabel {{ color: {t.text_muted}; font-size: 10px; background: transparent; }}
+#QgentActivity QLabel#QgentFastIndicator {{
+    color: {t.accent}; font-size: 10px; font-weight: 700;
+    background: transparent;
+}}
 
 /* ---- scroll area ---- */
 #QgentScroll {{ background: transparent; border: none; }}

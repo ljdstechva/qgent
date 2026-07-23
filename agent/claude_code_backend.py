@@ -79,12 +79,13 @@ class ClaudeCodeBackend(AgentBackend):
         self._tentative_session_id = None
         self._fable_fallback_attempted = False
         self._cancel_requested = False
+        self._turn_fast_mode = False
 
     # -- interface ----------------------------------------------------------
     def is_busy(self):
         return self.proc is not None and self.proc.state() != QProcess.NotRunning
 
-    def send(self, user_message, context_block):
+    def send(self, user_message, context_block, fast_mode=False):
         if self.is_busy():
             self.error.emit("A turn is already running.")
             return
@@ -101,6 +102,7 @@ class ClaudeCodeBackend(AgentBackend):
             prompt = context_block + "\n\n---\n\n" + user_message
         self._turn_prompt = prompt
         self._turn_session_id = self.session_id
+        self._turn_fast_mode = bool(fast_mode)
         self._fable_fallback_attempted = False
         self._cancel_requested = False
         self._start_attempt(
@@ -139,6 +141,8 @@ class ClaudeCodeBackend(AgentBackend):
                 "--settings", '{"env":{"ENABLE_TOOL_SEARCH":"false"}}',
                 "--allowedTools", _ALLOWED_TOOLS,
                 "--disallowedTools", _DISALLOWED_TOOLS]
+        if self._turn_fast_mode:
+            args += ["--effort", "low"]
         if resume_session:
             args += ["--resume", resume_session]
 
@@ -189,6 +193,7 @@ class ClaudeCodeBackend(AgentBackend):
         self._tentative_session_id = None
         self._fable_fallback_attempted = False
         self._cancel_requested = False
+        self._turn_fast_mode = False
 
     def _on_stdout(self, proc=None):
         proc = proc or self.proc

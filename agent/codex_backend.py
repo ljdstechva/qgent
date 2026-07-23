@@ -63,7 +63,7 @@ class CodexBackend(AgentBackend):
     def is_busy(self):
         return self.proc is not None and self.proc.state() != QProcess.NotRunning
 
-    def send(self, user_message, context_block):
+    def send(self, user_message, context_block, fast_mode=False):
         if self.is_busy():
             self.error.emit("A turn is already running.")
             return
@@ -86,14 +86,18 @@ class CodexBackend(AgentBackend):
             self.error.emit(self.last_stderr)
             return
 
+        effort_args = (
+            ["-c", 'model_reasoning_effort="low"'] if fast_mode else []
+        )
         if self.session_id:
             args = [
-                "exec", "resume", *isolation_args, self.session_id,
+                "exec", "resume", *isolation_args, *effort_args,
+                self.session_id,
                 "--model", self.last_model_id, "--json",
             ]
         else:
             args = [
-                "exec", *isolation_args,
+                "exec", *isolation_args, *effort_args,
                 "--model", self.last_model_id, "--json",
             ]
 
