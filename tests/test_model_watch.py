@@ -42,16 +42,18 @@ def test_new_model_ids():
     fresh = new_model_ids("claude", {
         "claude-opus-5", "claude-opus-4-8", "claude-sonnet-4-6",
         "claude-haiku-4-5", "claude-opus-6", "claude-mythos-5",
+        "claude-lyra-5",
     })
-    # Listed and superseded ids stay quiet; a newer version and a new family
-    # at the current ceiling are both news.
-    assert fresh == ["claude-mythos-5", "claude-opus-6"], fresh
+    # Listed and superseded ids stay quiet; a newer version and a new family at
+    # the current ceiling are news.  Mythos 5 is Glasswing-only, so it is not.
+    assert fresh == ["claude-lyra-5", "claude-opus-6"], fresh
 
     fresh = new_model_ids("codex", {
         "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-4.1",
-        "gpt-5.6", "gpt-5.7-sol", "gpt-6",
+        "gpt-5.6", "gpt-5.6-pro", "gpt-5.7-sol", "gpt-6",
     })
-    # "gpt-5.6" is a prefix fragment of a listed model, not a model.
+    # "gpt-5.6" is a prefix fragment of a listed model; "gpt-5.6-pro" is a
+    # reasoning mode of the base model, not a slug. Neither is a model.
     assert fresh == ["gpt-5.7-sol", "gpt-6"], fresh
 
 

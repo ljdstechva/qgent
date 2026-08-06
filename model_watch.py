@@ -34,6 +34,16 @@ _PATTERNS = {
     "claude": re.compile(rb"(?<![0-9a-z-])claude-[a-z]{3,12}-[0-9][0-9a-z.-]{0,24}"),
     "codex": re.compile(rb"(?<![0-9a-z.-])gpt-[0-9][0-9.]{0,8}(?:-[a-z]{2,16})?"),
 }
+# Ids the CLIs mention that are not selectable chat models.  Each entry is a
+# documented non-model, not a guess, so the notice stays trustworthy.
+NOT_SELECTABLE = {
+    # Codex CLI, verbatim: "GPT-5.6 Pro is a Responses reasoning mode on the
+    # base model, not a separate `gpt-5.6-pro` slug."
+    "gpt-5.6-pro",
+    # Mythos 5 is reachable only through Project Glasswing; selecting it fails
+    # for everyone outside that programme.  Fable 5 is the listed equivalent.
+    "claude-mythos-5",
+}
 # Adjacent strings in the executables run together with no separator, so a
 # match can pick up the start of the next one.
 _GLUED_TOKENS = ("openai", "gpt", "anthropic", "claude")
@@ -132,6 +142,8 @@ def new_model_ids(backend, discovered):
         if not parsed:
             continue
         canonical, family, version = parsed
+        if canonical in NOT_SELECTABLE:
+            continue
         if family in families:
             if version > families[family]:
                 fresh.append(canonical)

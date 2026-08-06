@@ -25,6 +25,11 @@ MODEL_CATALOG = {
             "aliases": ("claude-sonnet-5", "claude-sonnet-4-6"),
         },
         {
+            "id": "sonnet[1m]",
+            "label": "Sonnet 5 (1M context) — long sessions",
+            "aliases": ("claude-sonnet-5[1m]",),
+        },
+        {
             "id": "haiku",
             "label": "Haiku 4.5 — fastest, light tasks",
             "aliases": ("claude-haiku-4-5", "claude-haiku-4-5-20251001"),
@@ -37,6 +42,11 @@ MODEL_CATALOG = {
                 "model": "claude-opus-5", "effort": "max",
                 "label": "Claude · Opus 5 · max",
             },
+        },
+        {
+            "id": "opus[1m]",
+            "label": "Opus 5 (1M context) — long sessions, most capable",
+            "aliases": ("claude-opus-5[1m]",),
         },
         {
             "id": "fable",
