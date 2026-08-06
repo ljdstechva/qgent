@@ -1143,8 +1143,8 @@ class QueuePanel(QFrame):
 class ChatInput(QPlainTextEdit):
     """Auto-growing input: Enter sends, Shift+Enter inserts a newline.
 
-    Ctrl+V attaches instead of pasting when the clipboard holds an image or
-    local files; plain text pastes normally.
+    Ctrl+V attaches instead of pasting when the clipboard holds a screenshot
+    or files copied from a file manager; plain text pastes normally.
     """
 
     MIN_HEIGHT = 84
@@ -1159,7 +1159,7 @@ class ChatInput(QPlainTextEdit):
         super().__init__(parent)
         self.setPlaceholderText(
             "Ask QGent anything about this project…  "
-            "(Ctrl+V attaches a screenshot)")
+            "(Ctrl+V attaches a screenshot or copied files)")
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setFixedHeight(self.MIN_HEIGHT)
         self.textChanged.connect(self._grow)

@@ -75,10 +75,29 @@ def test_paste_target_is_an_accepted_attachment_kind():
     assert "MIN_HEIGHT = 84" in widgets
 
 
+def test_any_readable_file_is_attachable():
+    """Attaching must not be gated on a whitelist of GIS extensions.
+
+    QGent only ever hands the agent a path, so refusing a .pdf or a .txt
+    blocked files the agent reads perfectly well.
+    """
+    source = (Path(__file__).resolve().parents[1] / "ui" / "chat_dock.py"
+              ).read_text(encoding="utf-8")
+    assert "def _attachment_kind" in source
+    # The old gate rejected anything unlisted; it must be gone.
+    assert "Unsupported file:" not in source, "whitelist rejection is back"
+    assert 'return None, f"Folders cannot be attached' in source
+    # Labels come from the helper, never a direct lookup that would KeyError.
+    assert '"file_kind": _attachment_kind(extension)' in source
+    for extension in (".pdf", ".xlsx", ".txt", ".md", ".sql", ".gpx"):
+        assert f'"{extension}"' in source, extension
+
+
 def demo():
     test_section_lists_images()
     test_section_is_empty_without_usable_entries()
     test_paste_target_is_an_accepted_attachment_kind()
+    test_any_readable_file_is_attachable()
     print("paste attachment self-check: OK")
 
 

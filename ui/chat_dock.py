@@ -70,6 +70,9 @@ _SUGGESTIONS = [
     "Make an A3 vicinity map of the current canvas extent",
 ]
 
+# Friendly names only.  Any readable file may be attached — see
+# ``_attachment_kind`` — because QGent passes paths for the agent to read and
+# the agent, not this list, decides what it can make sense of.
 _ATTACHMENT_KINDS = {
     ".shp": "ESRI Shapefile",
     ".gpkg": "GeoPackage",
@@ -77,16 +80,70 @@ _ATTACHMENT_KINDS = {
     ".json": "JSON",
     ".kml": "KML",
     ".kmz": "KMZ archive",
+    ".gpx": "GPS exchange file",
+    ".gml": "GML",
+    ".dxf": "AutoCAD DXF",
     ".tif": "GeoTIFF raster",
     ".tiff": "GeoTIFF raster",
+    ".asc": "ASCII grid raster",
+    ".vrt": "GDAL virtual raster",
+    ".nc": "NetCDF dataset",
+    ".las": "LAS point cloud",
+    ".laz": "LAZ point cloud",
     ".csv": "CSV table",
+    ".tsv": "TSV table",
+    ".xlsx": "Excel workbook",
+    ".xls": "Excel workbook",
+    ".ods": "OpenDocument spreadsheet",
     ".qml": "QGIS layer style",
     ".qpt": "QGIS print layout template",
+    ".sld": "SLD style",
+    ".qgs": "QGIS project",
+    ".qgz": "QGIS project",
+    ".sqlite": "SQLite database",
+    ".db": "SQLite database",
+    ".pdf": "PDF document",
+    ".docx": "Word document",
+    ".doc": "Word document",
+    ".odt": "OpenDocument text",
+    ".txt": "text file",
+    ".md": "Markdown document",
+    ".log": "log file",
+    ".xml": "XML",
+    ".yaml": "YAML",
+    ".yml": "YAML",
+    ".toml": "TOML",
+    ".ini": "INI configuration",
+    ".cfg": "configuration file",
+    ".py": "Python script",
+    ".ipynb": "Jupyter notebook",
+    ".sql": "SQL script",
+    ".sh": "shell script",
+    ".bat": "batch script",
+    ".ps1": "PowerShell script",
+    ".zip": "ZIP archive",
     ".png": "PNG image",
     ".jpg": "JPEG image",
     ".jpeg": "JPEG image",
+    ".webp": "WebP image",
+    ".gif": "GIF image",
+    ".bmp": "BMP image",
 }
-_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
+_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
+
+
+def _attachment_kind(extension):
+    """Name a file kind, falling back to the extension for anything unlisted.
+
+    Unknown extensions are still attachable: QGent only ever hands the agent a
+    path, so a whitelist here would block files the agent can read perfectly
+    well (``.rst``, ``.geojsonl``, an extensionless ``Makefile``, …).
+    """
+    known = _ATTACHMENT_KINDS.get(str(extension or "").casefold())
+    if known:
+        return known
+    bare = str(extension or "").lstrip(".").upper()
+    return f"{bare} file" if bare else "file"
 # Pasted screenshots live under the profile, not the system temp directory, so
 # a queued request still resolves its image after a cleaner has run.
 _PASTED_DIR = ("qgent", "pasted")
@@ -156,8 +213,8 @@ def _attachment_descriptor(path):
     full_path = os.path.abspath(os.path.normpath(raw))
     name = os.path.basename(full_path) or full_path
     extension = os.path.splitext(full_path)[1].casefold()
-    if extension not in _ATTACHMENT_KINDS:
-        return None, f"Unsupported file: {name}"
+    if os.path.isdir(full_path):
+        return None, f"Folders cannot be attached: {name}"
     if not os.path.isfile(full_path):
         return None, f"File is unavailable: {name}"
     try:
@@ -188,7 +245,7 @@ def _attachment_descriptor(path):
         "name": name,
         "size": size,
         "extension": extension,
-        "file_kind": _ATTACHMENT_KINDS[extension],
+        "file_kind": _attachment_kind(extension),
         "warnings": warnings,
         "warning": " ".join(warnings),
     }, ""
