@@ -1193,7 +1193,39 @@ class ChatInput(QPlainTextEdit):
             if paths:
                 self.paths_pasted.emit(paths)
                 return
+        if source is not None and source.hasText():
+            paths = self.text_as_paths(source.text())
+            if paths:
+                self.paths_pasted.emit(paths)
+                return
         super().insertFromMimeData(source)
+
+    @staticmethod
+    def text_as_paths(text):
+        """Return existing local files named by pasted text, else ``[]``.
+
+        Copying a file path as text is the other everyday way to point at a
+        file.  Only text whose every line is an existing file counts, so
+        ordinary prose — and a path being *mentioned* rather than attached —
+        still pastes as text.
+        """
+        lines = [line.strip() for line in str(text or "").splitlines()]
+        lines = [line for line in lines if line]
+        if not lines or len(lines) > 20:
+            return []
+        paths = []
+        for line in lines:
+            # Windows "Copy as path" wraps the path in double quotes.
+            candidate = line.strip().strip('"').strip()
+            if len(candidate) < 4 or "\n" in candidate:
+                return []
+            try:
+                if not os.path.isfile(candidate):
+                    return []
+            except (OSError, ValueError):
+                return []
+            paths.append(candidate)
+        return paths
 
     def focusInEvent(self, event):
         super().focusInEvent(event)

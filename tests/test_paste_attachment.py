@@ -93,11 +93,60 @@ def test_any_readable_file_is_attachable():
         assert f'"{extension}"' in source, extension
 
 
+def test_pasted_text_paths_attach():
+    """A path copied as text should attach; prose must still paste as text."""
+    widgets = (Path(__file__).resolve().parents[1] / "ui" / "widgets.py"
+               ).read_text(encoding="utf-8")
+    assert "def text_as_paths" in widgets
+
+    # Exercise the real classifier without importing Qt.
+    namespace = {"os": __import__("os")}
+    body = widgets[widgets.index("    @staticmethod\n    def text_as_paths"):
+                   widgets.index("    def focusInEvent")]
+    exec("class T:\n" + body, namespace)  # noqa: S102 - our own source
+    text_as_paths = namespace["T"].text_as_paths
+
+    with tempfile.TemporaryDirectory() as root:
+        real = Path(root) / "survey.csv"
+        real.write_text("a,b\n", encoding="utf-8")
+        other = Path(root) / "notes.txt"
+        other.write_text("hi", encoding="utf-8")
+
+        assert text_as_paths(str(real)) == [str(real)]
+        # Windows "Copy as path" wraps the path in quotes.
+        assert text_as_paths('"%s"' % real) == [str(real)]
+        # Several paths at once.
+        assert text_as_paths(f"{real}\n{other}") == [str(real), str(other)]
+        # Surrounding whitespace is tolerated.
+        assert text_as_paths(f"  {real}  \n") == [str(real)]
+
+        # Anything that is not entirely existing files stays as text.
+        assert text_as_paths("just some prose") == []
+        assert text_as_paths(str(Path(root) / "ghost.csv")) == []
+        assert text_as_paths(f"{real}\nnot a path") == []
+        assert text_as_paths(root) == []           # a folder is not a file
+        assert text_as_paths("") == []
+        assert text_as_paths("\n".join([str(real)] * 25)) == []  # absurd count
+
+
+def test_attachments_are_cleared_on_new_session():
+    source = (Path(__file__).resolve().parents[1] / "ui" / "chat_dock.py"
+              ).read_text(encoding="utf-8")
+    assert "def _discard_pasted_images" in source
+    new_session = source[source.index("    def new_session(self):"):
+                         source.index("    def open_settings(self):")]
+    # Attachments live for the conversation, then go with it.
+    assert "self._attached_files = []" in new_session, new_session[-400:]
+    assert "_discard_pasted_images()" in new_session, new_session[-400:]
+
+
 def demo():
     test_section_lists_images()
     test_section_is_empty_without_usable_entries()
     test_paste_target_is_an_accepted_attachment_kind()
     test_any_readable_file_is_attachable()
+    test_pasted_text_paths_attach()
+    test_attachments_are_cleared_on_new_session()
     print("paste attachment self-check: OK")
 
 

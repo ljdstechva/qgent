@@ -147,7 +147,10 @@ def _attachment_kind(extension):
 # Pasted screenshots live under the profile, not the system temp directory, so
 # a queued request still resolves its image after a cleaner has run.
 _PASTED_DIR = ("qgent", "pasted")
-_PASTED_KEEP = 50
+# Pasted screenshots are cleared when a new session starts.  This cap is only
+# the backstop for one very long session (or a crash before that cleanup), so
+# it is set well above any plausible single conversation.
+_PASTED_KEEP = 200
 
 _VISUAL_CHANGE_TOOLS = {"execute_pyqgis", "run_processing"}
 _SNAPSHOT_TOOL = "render_map_snapshot"
@@ -575,6 +578,21 @@ class ChatDock(QDockWidget):
         os.makedirs(path, exist_ok=True)
         self._prune_pasted_images(path)
         return path
+
+    def _discard_pasted_images(self):
+        """Delete every screenshot pasted during the session that just ended.
+
+        They were only ever scratch copies of the clipboard, kept so the
+        agent could read them mid-conversation.
+        """
+        try:
+            directory = os.path.join(
+                QgsApplication.qgisSettingsDirPath(), *_PASTED_DIR)
+            if not os.path.isdir(directory):
+                return 0
+            return self._prune_pasted_images(directory, keep=0)
+        except OSError:
+            return 0
 
     @staticmethod
     def _prune_pasted_images(directory, keep=_PASTED_KEEP):
@@ -2014,6 +2032,11 @@ class ChatDock(QDockWidget):
         self._build_backend(preserve_session=False)
         self._history_update_session()
         self._clear_messages()
+        # Attachments belong to the conversation that produced them: they stay
+        # available all session, and a new session starts with a clean slate.
+        self._attached_files = []
+        self._update_layer_context_strip()
+        self._discard_pasted_images()
         self.session_label.setText("new session")
         self._post_welcome()
 
