@@ -7,6 +7,7 @@ MODEL_ROLES = ("supervisor", "worker", "light")
 CUSTOM_MODEL_SENTINEL = "__qgent_custom_model__"
 MODEL_PRESET_SPEED = "speed"
 MODEL_PRESET_MAX_QUALITY = "max_quality"
+MODEL_PRESET_LONG_CONTEXT = "long_context"
 MODEL_PRESET_CUSTOM = "custom"
 LIGHT_ROLE_TOOLTIP = (
     "Scout/verifier are read-and-report; bigger models only slow them down."
@@ -47,6 +48,11 @@ MODEL_CATALOG = {
             "id": "opus[1m]",
             "label": "Opus 5 (1M context) — long sessions, most capable",
             "aliases": ("claude-opus-5[1m]",),
+        },
+        {
+            "id": "opusplan",
+            "label": "Opus Plan — Opus plans, Sonnet executes",
+            "aliases": (),
         },
         {
             "id": "fable",
@@ -92,10 +98,12 @@ MODEL_DEFAULTS = {
 
 # Presets intentionally reuse the existing per-backend/per-role settings.  A
 # preset is UI shorthand for an exact three-value signature, never a separate
-# persisted setting.
+# persisted setting.  A preset that omits a backend is not offered for it —
+# see ``model_preset_options``.
 MODEL_PRESET_OPTIONS = (
     ("Speed (recommended)", MODEL_PRESET_SPEED),
     ("Max quality", MODEL_PRESET_MAX_QUALITY),
+    ("Long context (1M)", MODEL_PRESET_LONG_CONTEXT),
     ("Custom…", MODEL_PRESET_CUSTOM),
 )
 
@@ -120,6 +128,13 @@ MODEL_PRESETS = {
             "light": "gpt-5.6-sol",
         },
     },
+    # Claude Code only: Codex exposes no long-context model variants, so this
+    # preset is simply not offered when the Codex backend is selected.
+    MODEL_PRESET_LONG_CONTEXT: {
+        "claude": {
+            "supervisor": "opus[1m]", "worker": "opus[1m]", "light": "haiku",
+        },
+    },
 }
 
 MODEL_IDS_BY_BACKEND = {
@@ -139,9 +154,17 @@ def model_options(backend):
     return tuple((entry["label"], entry["id"]) for entry in entries)
 
 
-def model_preset_options():
-    """Return the three primary preset rows in their required UI order."""
-    return MODEL_PRESET_OPTIONS
+def model_preset_options(backend=None):
+    """Return the preset rows in UI order, dropping any the backend lacks.
+
+    ``Custom…`` always applies.  Without a backend the full list is returned.
+    """
+    if not backend:
+        return MODEL_PRESET_OPTIONS
+    return tuple(
+        (label, preset) for label, preset in MODEL_PRESET_OPTIONS
+        if preset == MODEL_PRESET_CUSTOM
+        or len(model_preset_values(backend, preset)) == len(MODEL_ROLES))
 
 
 def model_preset_values(backend, preset):
@@ -155,7 +178,9 @@ def classify_model_preset(backend, choices):
     """Classify exact stored choices without inventing preset provenance."""
     backend = str(backend or "").lower()
     choices = choices if isinstance(choices, dict) else {}
-    for preset in (MODEL_PRESET_SPEED, MODEL_PRESET_MAX_QUALITY):
+    for _label, preset in model_preset_options(backend):
+        if preset == MODEL_PRESET_CUSTOM:
+            continue
         expected = model_preset_values(backend, preset)
         if len(expected) != len(MODEL_ROLES):
             continue

@@ -98,8 +98,7 @@ class SettingsDialog(QDialog):
         self.models_group = QGroupBox("Models — Claude Code")
         mform = QFormLayout(self.models_group)
         self.model_preset = QComboBox()
-        for label, preset in config.model_preset_options():
-            self.model_preset.addItem(label, preset)
+        self._populate_model_presets("claude")
         mform.addRow("Preset", self.model_preset)
         self.fast_mode = QCheckBox("Use Fast mode for new turns")
         self.fast_mode.setToolTip(FAST_MODE_TOOLTIP)
@@ -349,7 +348,18 @@ class SettingsDialog(QDialog):
         finally:
             self._loading_models = False
 
+    def _populate_model_presets(self, backend):
+        """Rebuild the preset rows: not every preset applies to every backend."""
+        self.model_preset.blockSignals(True)
+        try:
+            self.model_preset.clear()
+            for label, preset in config.model_preset_options(backend):
+                self.model_preset.addItem(label, preset)
+        finally:
+            self.model_preset.blockSignals(False)
+
     def _sync_model_preset(self, backend):
+        self._populate_model_presets(backend)
         preset = config.classify_model_preset(
             backend, self._model_memory.get(backend, {}))
         index = self.model_preset.findData(preset)
