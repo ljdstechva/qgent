@@ -12,28 +12,30 @@ LIGHT_ROLE_TOOLTIP = (
     "Scout/verifier are read-and-report; bigger models only slow them down."
 )
 
-# Neither Claude Code 2.1.214 nor Codex CLI 0.144.1 exposes a headless model
-# enumeration command. ``id`` is the single ordinary chat value; ``aliases``
-# are accepted only for migration/validation and are never duplicate UI rows.
+# Neither Claude Code 2.1.223 nor Codex CLI 0.146.1 exposes a headless model
+# enumeration command, so this list is curated. ``model_watch`` discovers ids
+# the installed CLIs know about and flags anything newer than what is listed
+# here. ``id`` is the single ordinary chat value; ``aliases`` are accepted only
+# for migration/validation and are never duplicate UI rows.
 MODEL_CATALOG = {
     "claude": (
         {
             "id": "sonnet",
-            "label": "Sonnet — balanced (default)",
-            "aliases": ("claude-sonnet-5",),
+            "label": "Sonnet 5 — balanced (default)",
+            "aliases": ("claude-sonnet-5", "claude-sonnet-4-6"),
         },
         {
             "id": "haiku",
-            "label": "Haiku — fastest, light tasks",
-            "aliases": ("claude-haiku-4-5-20251001",),
+            "label": "Haiku 4.5 — fastest, light tasks",
+            "aliases": ("claude-haiku-4-5", "claude-haiku-4-5-20251001"),
         },
         {
             "id": "opus",
-            "label": "Opus 4.8 — most capable",
-            "aliases": ("claude-opus-4-8",),
+            "label": "Opus 5 — most capable",
+            "aliases": ("claude-opus-5", "claude-opus-4-8"),
             "repair": {
-                "model": "claude-opus-4-8", "effort": "max",
-                "label": "Claude · Opus 4.8 · max",
+                "model": "claude-opus-5", "effort": "max",
+                "label": "Claude · Opus 5 · max",
             },
         },
         {
@@ -59,6 +61,11 @@ MODEL_CATALOG = {
         {
             "id": "gpt-5.6-terra",
             "label": "GPT-5.6 Terra — fast",
+            "aliases": (),
+        },
+        {
+            "id": "gpt-5.6-luna",
+            "label": "GPT-5.6 Luna — small, cheapest",
             "aliases": (),
         },
     ),

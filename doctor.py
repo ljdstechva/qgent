@@ -17,6 +17,7 @@ from .doctor_core import (
     redact as _redact, run as _run,
 )
 from .history import HistoryStore
+from .model_watch import check_models, summary_text
 
 
 # Compatibility name retained for Goal 5 callers; values are derived from the
@@ -145,6 +146,22 @@ class DoctorService:
             f"path={path}; version={(version.stdout or version.stderr).strip()}; "
             f"auth={auth_detail}")
         return _check_record(f"cli_{backend}", name, ok, detail, True)
+
+    def _check_models(self):
+        """Report models the installed CLIs know about but QGent does not list.
+
+        Informational: a newer model shipping is news, not a broken install, so
+        this never fails the run.
+        """
+        try:
+            report = check_models(self._profile_dir(), {
+                "claude": self._configured_cli("claude")[1] or config.detect_claude(),
+                "codex": self._configured_cli("codex")[1] or config.detect_codex(),
+            })
+            detail = summary_text(report)
+        except Exception as exc:
+            detail = f"Model check failed: {type(exc).__name__}: {exc}"
+        return _check_record("models", "Model catalogue freshness", True, detail)
 
     def _check_python(self):
         path = _command_path(self._value("python_executable", "")
@@ -385,6 +402,7 @@ class DoctorService:
         for method in (
                 lambda: self._check_cli("claude"),
                 lambda: self._check_cli("codex"),
+                self._check_models,
                 self._check_python,
                 self._check_mcp_config,
                 self._check_codex_config,
@@ -504,5 +522,25 @@ class DoctorWorker(QThread):
     def run(self):
         try:
             self.completed.emit(self.service.run_diagnostics())
+        except Exception as exc:
+            self.failed.emit(f"{type(exc).__name__}: {exc}")
+
+
+class ModelWatchWorker(QThread):
+    """Scan the CLIs for unknown models off the UI thread (~2 s per binary)."""
+
+    completed = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, profile_dir, parent=None):
+        super().__init__(parent)
+        self.profile_dir = str(profile_dir)
+
+    def run(self):
+        try:
+            self.completed.emit(check_models(self.profile_dir, {
+                "claude": config.detect_claude(),
+                "codex": config.detect_codex(),
+            }))
         except Exception as exc:
             self.failed.emit(f"{type(exc).__name__}: {exc}")
