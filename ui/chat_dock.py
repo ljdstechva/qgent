@@ -82,7 +82,15 @@ _ATTACHMENT_KINDS = {
     ".csv": "CSV table",
     ".qml": "QGIS layer style",
     ".qpt": "QGIS print layout template",
+    ".png": "PNG image",
+    ".jpg": "JPEG image",
+    ".jpeg": "JPEG image",
 }
+_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
+# Pasted screenshots live under the profile, not the system temp directory, so
+# a queued request still resolves its image after a cleaner has run.
+_PASTED_DIR = ("qgent", "pasted")
+_PASTED_KEEP = 50
 
 _VISUAL_CHANGE_TOOLS = {"execute_pyqgis", "run_processing"}
 _SNAPSHOT_TOOL = "render_map_snapshot"
@@ -375,6 +383,8 @@ class ChatDock(QDockWidget):
         self.input.send_requested.connect(self.on_send)
         self.input.focus_changed.connect(
             lambda on: self._set_composer_focus(composer, on))
+        self.input.image_pasted.connect(self._attach_pasted_image)
+        self.input.paths_pasted.connect(self._attach_dropped_paths)
         crow.addWidget(self.input, 1)
         self.queue_add_btn = QPushButton("+ Queue")
         self.queue_add_btn.setObjectName("QgentQueueAdd")
@@ -502,13 +512,75 @@ class ChatDock(QDockWidget):
                 f"Attached {len(accepted)} {suffix} to the next request.")
         return accepted, rejected
 
+    def _pasted_dir(self):
+        path = os.path.join(
+            QgsApplication.qgisSettingsDirPath(), *_PASTED_DIR)
+        os.makedirs(path, exist_ok=True)
+        self._prune_pasted_images(path)
+        return path
+
+    @staticmethod
+    def _prune_pasted_images(directory, keep=_PASTED_KEEP):
+        """Keep only the newest screenshots; pasting must not leak disk.
+
+        Best effort: a file that cannot be removed (queued request still
+        pointing at it, antivirus lock) is simply left alone.
+        """
+        try:
+            entries = sorted(
+                (item for item in os.scandir(directory)
+                 if item.is_file() and os.path.splitext(item.name)[1].casefold()
+                 in _IMAGE_EXTENSIONS),
+                key=lambda item: item.stat().st_mtime, reverse=True)
+        except OSError:
+            return 0
+        removed = 0
+        for item in entries[keep:]:
+            try:
+                os.remove(item.path)
+                removed += 1
+            except OSError:
+                continue
+        return removed
+
+    def _attach_pasted_image(self, image):
+        """Save a clipboard screenshot to disk, then attach it like a drop.
+
+        The CLIs read attachments by path, so a pasted image has to become a
+        real file before it can be part of a request.
+        """
+        try:
+            image = QImage(image)
+            if image.isNull():
+                self._push_drop_warning("Pasted image was empty.")
+                return
+            name = "screenshot-{}.png".format(
+                datetime.datetime.now().strftime("%Y%m%d-%H%M%S-%f"))
+            path = os.path.join(self._pasted_dir(), name)
+            if not image.save(path, "PNG"):
+                self._push_drop_warning(f"Could not save pasted image: {name}")
+                return
+        except Exception as exc:
+            self._push_drop_warning(
+                f"Could not attach pasted image: {type(exc).__name__}: {exc}")
+            return
+        accepted, _rejected = self._attach_dropped_paths([path])
+        if accepted:
+            self._set_activity(
+                f"Attached pasted screenshot ({image.width()}×"
+                f"{image.height()}) to the next request.")
+
     def _attachment_snapshot(self):
         return tuple(dict(item) for item in self._attached_files)
 
     @staticmethod
     def _attachment_tags(attachments):
         return tuple(
-            f"📄 {str(item.get('name') or os.path.basename(str(item.get('path') or '')))}"
+            "{} {}".format(
+                "🖼" if str(item.get("extension") or "").casefold()
+                in _IMAGE_EXTENSIONS else "📄",
+                str(item.get("name")
+                    or os.path.basename(str(item.get("path") or ""))))
             for item in (attachments or ())
             if str(item.get("name") or item.get("path") or "").strip()
         )

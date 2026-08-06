@@ -1141,16 +1141,27 @@ class QueuePanel(QFrame):
 # Composer pieces
 # ===========================================================================
 class ChatInput(QPlainTextEdit):
-    """Auto-growing input: Enter sends, Shift+Enter inserts a newline."""
+    """Auto-growing input: Enter sends, Shift+Enter inserts a newline.
+
+    Ctrl+V attaches instead of pasting when the clipboard holds an image or
+    local files; plain text pastes normally.
+    """
+
+    MIN_HEIGHT = 84
+    MAX_HEIGHT = 280
 
     send_requested = pyqtSignal()
     focus_changed = pyqtSignal(bool)
+    image_pasted = pyqtSignal(object)
+    paths_pasted = pyqtSignal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setPlaceholderText("Ask QGent anything about this project…")
+        self.setPlaceholderText(
+            "Ask QGent anything about this project…  "
+            "(Ctrl+V attaches a screenshot)")
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.setFixedHeight(36)
+        self.setFixedHeight(self.MIN_HEIGHT)
         self.textChanged.connect(self._grow)
 
     def keyPressEvent(self, event):
@@ -1159,6 +1170,30 @@ class ChatInput(QPlainTextEdit):
             self.send_requested.emit()
             return
         super().keyPressEvent(event)
+
+    def canInsertFromMimeData(self, source):  # noqa: N802 (Qt override)
+        if source is not None and (source.hasImage() or source.hasUrls()):
+            return True
+        return super().canInsertFromMimeData(source)
+
+    def insertFromMimeData(self, source):  # noqa: N802 (Qt override)
+        """Route pasted images and local files to the attachment pipeline.
+
+        Qt calls this for Ctrl+V and middle-click paste alike, so both reach
+        the same place without a second key handler.
+        """
+        if source is not None and source.hasImage():
+            image = source.imageData()
+            if image is not None and not image.isNull():
+                self.image_pasted.emit(image)
+                return
+        if source is not None and source.hasUrls():
+            paths = [str(url.toLocalFile()) for url in source.urls()
+                     if url.isLocalFile() and url.toLocalFile()]
+            if paths:
+                self.paths_pasted.emit(paths)
+                return
+        super().insertFromMimeData(source)
 
     def focusInEvent(self, event):
         super().focusInEvent(event)
@@ -1169,8 +1204,14 @@ class ChatInput(QPlainTextEdit):
         self.focus_changed.emit(False)
 
     def _grow(self):
-        h = int(self.document().size().height()) + 14
-        self.setFixedHeight(max(36, min(h, 120)))
+        # QPlainTextEdit measures its document height in LINES, not pixels, so
+        # it has to be scaled by the line spacing before it means anything.
+        document = self.document()
+        lines = max(1.0, float(document.size().height()))
+        chrome = int(document.documentMargin() * 2) + 2 * self.frameWidth() + 8
+        height = int(lines * self.fontMetrics().lineSpacing()) + chrome
+        self.setFixedHeight(
+            max(self.MIN_HEIGHT, min(height, self.MAX_HEIGHT)))
 
 
 class FastModeButton(QPushButton):

@@ -126,9 +126,13 @@ def build_attached_files_section(attached_files):
     attached_files = list(attached_files or [])
     if not attached_files:
         return ""
-    lines = [
-        "## ATTACHED FILES (the user dropped these for this request):"
+    header = [
+        "## ATTACHED FILES (the user dropped or pasted these for this "
+        "request):",
+        "  Read any image listed below — it is usually a screenshot of what "
+        "the user is asking about.",
     ]
+    lines = []
     for item in attached_files:
         try:
             path = str(item["path"]).replace("\r", " ").replace("\n", " ")
@@ -147,7 +151,9 @@ def build_attached_files_section(attached_files):
                 lines.append(f"    Warning: {warning}")
         except (KeyError, TypeError, ValueError):
             continue
-    return "\n".join(lines) if len(lines) > 1 else ""
+    # Every entry can still be skipped above, and a header with no files under
+    # it would be a lie to the model.
+    return "\n".join(header + lines) if lines else ""
 
 
 def build_context_block(
