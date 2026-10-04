@@ -21,6 +21,7 @@ import traceback
 from qgis.PyQt.QtCore import QObject, pyqtSlot
 
 from .. import config
+from .layout_tools import LayoutToolError, LayoutTools
 
 
 # Tools that can change project state, and so are worth a checkpoint first.
@@ -34,6 +35,7 @@ class MainThreadExecutor(QObject):
         super().__init__(parent)
         self.iface = iface
         self._checkpoint_signature = None
+        self._layouts = LayoutTools(iface)
 
     # The single entry point. ``payload`` = {tool, args, result, event}.
     @pyqtSlot(object)
@@ -291,6 +293,19 @@ class MainThreadExecutor(QObject):
             ).isoformat(),
         }
         return json.dumps(payload)
+
+    def _tool_layout_info(self, args):
+        return self._layout_call(self._layouts.info, args)
+
+    def _tool_manage_layouts(self, args):
+        return self._layout_call(self._layouts.manage, args)
+
+    def _layout_call(self, method, args):
+        try:
+            result = method(args)
+        except LayoutToolError as exc:
+            return "ERROR: " + str(exc)
+        return self._truncate(json.dumps(result, indent=1, default=str))
 
     # -- lookup -------------------------------------------------------------
     def _find_layer(self, name_or_id):

@@ -5,7 +5,7 @@ description: >
   Definition of Done. Use PROACTIVELY after any multi-step geoprocessing or
   mapping task, before reporting success to the user. Read-only — it grades, it
   cannot fix.
-tools: mcp__qgis__get_project_context, mcp__qgis__get_layer_features, mcp__qgis__render_map_snapshot, mcp__qgis__stat_path
+tools: mcp__qgis__get_project_context, mcp__qgis__get_layer_features, mcp__qgis__render_map_snapshot, mcp__qgis__stat_path, mcp__qgis__layout_info
 model: haiku
 ---
 

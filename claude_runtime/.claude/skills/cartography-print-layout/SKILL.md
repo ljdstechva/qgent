@@ -59,12 +59,18 @@ lyr.setLabelsEnabled(True); lyr.triggerRepaint()
 ```
 
 ## Full print layout (map + legend + scale bar + north arrow + grid + title)
+
+Prefer `manage_layouts` (see `layout-templates`): it builds this from a
+preset, lints it, and renders a preview. The raw recipe below is for cases the
+tool does not cover. `removeLayout` and `saveAsTemplate` are approval-gated —
+pick a free name rather than deleting a layout the user may have made.
 ```python
 project = QgsProject.instance()
 manager = project.layoutManager()
 name = "Vicinity Map A3"
-old = manager.layoutByName(name)
-if old: manager.removeLayout(old)          # replace, don't stack duplicates
+base, n = name, 2
+while manager.layoutByName(name):          # never clobber an existing layout
+    name = f"{base} ({n})"; n += 1
 layout = QgsPrintLayout(project); layout.initializeDefaults()
 layout.setName(name)
 # A3 landscape

@@ -20,6 +20,7 @@ _GEOMETRY_LABELS = {
 }
 
 _FAST_LAYER_LIMIT = 30
+_LAYOUT_LIMIT = 12
 _FAST_MODE_DIRECTIVE = """## FAST MODE (user-enabled for this turn)
 Work with the minimum number of model round trips:
 - Do the work yourself in ONE consolidated execute_pyqgis script where
@@ -36,6 +37,15 @@ Work with the minimum number of model round trips:
 - UNCHANGED even in fast mode: destructive-code approval, asking via
   ask_user when ambiguity materially changes the outcome (a wrong
   guess costs more than the question), and honest failure reporting."""
+
+
+def _print_layout_names(project):
+    """Names of the project's print layouts, so layout requests are grounded."""
+    try:
+        return [str(layout.name())
+                for layout in project.layoutManager().printLayouts()]
+    except (AttributeError, RuntimeError):
+        return []
 
 
 def build_fast_mode_directive():
@@ -196,6 +206,14 @@ def build_context_block(
                 count = ""
         star = " *ACTIVE*" if active is not None and lyr.id() == active.id() else ""
         lines.append(f"  - {lyr.name()} [{detail}{geom}, {crs}{count}]{star}")
+
+    layout_names = _print_layout_names(project)
+    if layout_names:
+        shown = layout_names[:_LAYOUT_LIMIT]
+        more = len(layout_names) - len(shown)
+        lines.append(
+            f"Print layouts ({len(layout_names)}): " + ", ".join(shown)
+            + (f", +{more} more" if more > 0 else ""))
 
     ext = canvas.extent()
     if fast_mode:

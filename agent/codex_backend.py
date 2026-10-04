@@ -29,6 +29,8 @@ _QGIS_TOOLS = (
     "get_layer_features",
     "render_map_snapshot",
     "stat_path",
+    "layout_info",
+    "manage_layouts",
     "ask_user",
 )
 

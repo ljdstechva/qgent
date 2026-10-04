@@ -10,6 +10,7 @@ false negatives risk data loss. AST first (robust), regex fallback for strings
 the AST can't classify.
 """
 import ast
+import json
 import re
 
 # Attribute/callable names that mutate files, layers, or the project on disk.
@@ -23,6 +24,9 @@ _DESTRUCTIVE_CALLS = {
     "commitChanges",
     "writeAsVectorFormat", "writeAsVectorFormatV3",
     "removeMapLayer", "removeMapLayers", "removeAllMapLayers",
+    # A hand-built print layout is lost on remove; a template file is
+    # silently replaced on save. manage_layouts gates both precisely.
+    "removeLayout", "saveAsTemplate",
 }
 # Module.function combinations worth flagging outright.
 _DESTRUCTIVE_ATTR_PATHS = {
@@ -91,6 +95,43 @@ def fatal_calls(code):
                 hits.append(_FATAL_CALLS[node.func.attr])
     seen = set()
     return [h for h in hits if not (h in seen or seen.add(h))]
+
+
+def layout_reasons(args):
+    """Why a ``manage_layouts`` call needs the user's approval ([] = none).
+
+    Decided from the arguments alone, in the bridge thread, before the call
+    reaches the GUI thread: the tool itself refuses to overwrite, replace or
+    delete unless the very flag that triggered this approval is set.
+    """
+    if not isinstance(args, dict):
+        return []
+    action = str(args.get("action") or "")
+    spec = args.get("spec")
+    if isinstance(spec, str):
+        try:
+            spec = json.loads(spec)
+        except ValueError:
+            spec = {}
+    spec = spec if isinstance(spec, dict) else {}
+    reasons = []
+    if action == "delete":
+        reasons.append("deletes print layout {!r} from the project".format(
+            str(args.get("layout") or "")))
+    elif action == "build" and (spec.get("replace") or args.get("replace"))             and str(spec.get("mode") or "create") == "create":
+        reasons.append(
+            "replaces print layout {!r} if it already exists".format(
+                str(spec.get("name") or "")))
+    elif action == "create_from_template" and args.get("replace"):
+        reasons.append(
+            "replaces print layout {!r} if it already exists".format(
+                str(args.get("layout_name") or "")))
+    elif action in ("save_template", "export") and args.get("overwrite"):
+        target = (args.get("path") or args.get("name") or args.get("layout")
+                  or "")
+        reasons.append("overwrites {!r} if it already exists".format(
+            str(target)))
+    return reasons
 
 
 def scan(code):

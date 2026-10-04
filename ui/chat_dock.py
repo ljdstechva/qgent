@@ -39,6 +39,7 @@ from qgis.core import (
 )
 
 from .. import config
+from ..agent.question_detect import detect_question
 from . import theme
 from .animations import fade_in, smooth_scroll_to_bottom, staggered, ThinkingDots
 from .widgets import (
@@ -68,6 +69,7 @@ _SUGGESTIONS = [
     "What CRS is this project?",
     "Buffer the active layer by 100 m and add the result",
     "Make an A3 vicinity map of the current canvas extent",
+    "Design an A3 landscape map template and save it to Layout Manager",
 ]
 
 # Friendly names only.  Any readable file may be attached — see
@@ -154,13 +156,16 @@ _PASTED_KEEP = 200
 
 _VISUAL_CHANGE_TOOLS = {"execute_pyqgis", "run_processing"}
 _SNAPSHOT_TOOL = "render_map_snapshot"
+# layout_info's render action returns a page preview in the same shape.
+_LAYOUT_PREVIEW_TOOL = "layout_info"
 _SNAPSHOT_MAX_EDGE = 640
 
 
 def _canonical_qgis_tool_name(name):
     """Return a known QGIS tool's terminal name across backend spellings."""
     text = str(name or "").strip()
-    for known in (*sorted(_VISUAL_CHANGE_TOOLS), _SNAPSHOT_TOOL):
+    for known in (*sorted(_VISUAL_CHANGE_TOOLS), _SNAPSHOT_TOOL,
+                  _LAYOUT_PREVIEW_TOOL):
         if text == known or any(text.endswith(separator + known) for separator in (
                 "__", ".", "/", ":")):
             return known
@@ -290,6 +295,9 @@ class ChatDock(QDockWidget):
         self._active_turn = None
         self._live_approvals = {}
         self._live_questions = {}
+        # Questions found at the end of an agent reply (not ask_user): id ->
+        # {card, question, options}. Answering one sends a new message.
+        self._detected_questions = {}
         self._queue_tasks = []
         self._queue_running = False
         self._queue_pause_after_current = False
@@ -985,8 +993,21 @@ class ChatDock(QDockWidget):
                 caption=str(caption))
         return card
 
-    def _record_explicit_snapshot(self, result):
-        """Copy one first-seen render_map_snapshot result into history."""
+    @staticmethod
+    def _layout_preview_caption(result):
+        try:
+            decoded = json.loads(str(result or ""))
+        except (TypeError, ValueError):
+            decoded = {}
+        name = str(decoded.get("layout") or "print layout") \
+            if isinstance(decoded, dict) else "print layout"
+        page = decoded.get("page") if isinstance(decoded, dict) else None
+        suffix = f", page {page}" if page and page != 1 else ""
+        return (f"Layout preview — {name}{suffix} · "
+                + datetime.datetime.now().strftime("%H:%M"))
+
+    def _record_explicit_snapshot(self, result, caption=None):
+        """Copy one first-seen snapshot or layout preview into history."""
         turn = self._active_turn
         if turn is None or not self._snapshots_enabled():
             return None
@@ -1019,7 +1040,7 @@ class ChatDock(QDockWidget):
             seen.add(fingerprint)
             turn["explicit_snapshot_sequence"] = sequence
             return self._add_snapshot_card(
-                target, self._snapshot_caption())
+                target, caption or self._snapshot_caption())
         except Exception as exc:
             self._log_history_warning(
                 "Map snapshot copy failed: {}: {}".format(
@@ -1100,12 +1121,16 @@ class ChatDock(QDockWidget):
         subagent_widgets = {}
         approval_widgets = {}
         question_widgets = {}
+        detected_cards = {}
+        detected_open = {}
+        last_user_index = -1
         self._history_replaying = True
         try:
             for index, record in enumerate(records):
                 kind = record.get("kind")
                 stamp = self._display_timestamp(record.get("t"))
                 if kind == "user":
+                    last_user_index = index
                     self._add_user_message(
                         self._record_text(record, "text"),
                         record.get("tags") or [], persist=False,
@@ -1163,6 +1188,27 @@ class ChatDock(QDockWidget):
                     elif record.get("event") == "cancelled":
                         card.set_cancelled(
                             self._record_text(record, "reason", "Approval cancelled"))
+                elif kind == "question" and record.get("source") == "detected":
+                    question_id = str(
+                        record.get("question_id") or f"legacy-{index}")
+                    card = detected_cards.get(question_id)
+                    if card is None:
+                        card = QuestionCard(
+                            self._record_text(record, "question"),
+                            [str(option) for option in (
+                                record.get("options") or [])],
+                            True, self.t, detected=True)
+                        detected_cards[question_id] = card
+                        self._question_history[question_id] = card
+                        self._add_widget(card, animate=False)
+                    if record.get("event") == "answered":
+                        detected_open.pop(question_id, None)
+                        card.set_answer(
+                            self._record_text(record, "answer"),
+                            self._record_text(record, "answer_kind", "typed"),
+                            restored=True)
+                    else:
+                        detected_open[question_id] = (index, record)
                 elif kind == "question":
                     question_id = str(
                         record.get("question_id") or f"legacy-{index}")
@@ -1215,6 +1261,24 @@ class ChatDock(QDockWidget):
                 if index and index % 25 == 0:
                     QCoreApplication.processEvents()
 
+            for question_id, (index, record) in detected_open.items():
+                card = detected_cards[question_id]
+                if last_user_index > index:
+                    card.set_terminal(
+                        "answered", answer="(replied in chat)",
+                        answer_kind="typed", restored=True)
+                    continue
+                # The conversation still ends on this question and its
+                # session resumes, so the card stays answerable.
+                card.answered.connect(
+                    lambda value, kind, qid=question_id:
+                    self._answer_detected_question(qid, value, kind))
+                self._detected_questions[question_id] = {
+                    "card": card,
+                    "question": self._record_text(record, "question"),
+                    "options": tuple(str(option) for option in (
+                        record.get("options") or [])),
+                }
             for chip in tool_widgets.values():
                 if not chip.is_static_state():
                     chip.set_static_result("(turn interrupted before result)")
@@ -1404,6 +1468,7 @@ class ChatDock(QDockWidget):
         text = self.input.toPlainText().strip()
         if not text:
             return
+        self._close_detected_questions(text)
         if (self._queue_running
                 or (self.backend is not None and self.backend.is_busy())):
             self._enqueue_text(text)
@@ -1415,6 +1480,7 @@ class ChatDock(QDockWidget):
         text = self.input.toPlainText().strip()
         if not text:
             return
+        self._close_detected_questions(text)
         self._enqueue_text(text)
         self.input.clear()
 
@@ -2111,6 +2177,9 @@ class ChatDock(QDockWidget):
                 self._history_append(
                     "assistant", text=bubble.text(),
                     fast=bool((self._active_turn or {}).get("fast")))
+            if self._active_turn is not None and bubble.text():
+                # The reply's final message is what may end in a question.
+                self._active_turn["last_text"] = bubble.text()
         self._current_bubble = None
 
     # ======================================================================
@@ -2124,6 +2193,7 @@ class ChatDock(QDockWidget):
                 and canonical_name in _VISUAL_CHANGE_TOOLS):
             self._active_turn["visual_change_tool_ran"] = True
         self._end_stream()
+        self._forget_last_text()
         self._hide_thinking()
         if self._last_tool_chip is not None and not self._last_tool_finished:
             self._last_tool_chip.mark_done_without_result()
@@ -2166,8 +2236,12 @@ class ChatDock(QDockWidget):
             if report.get("result") is None:
                 report["result"] = str(text)
                 break
-        if _canonical_qgis_tool_name(self._last_tool_name) == _SNAPSHOT_TOOL:
+        canonical = _canonical_qgis_tool_name(self._last_tool_name)
+        if canonical == _SNAPSHOT_TOOL:
             self._record_explicit_snapshot(text)
+        elif canonical == _LAYOUT_PREVIEW_TOOL:
+            self._record_explicit_snapshot(
+                text, caption=self._layout_preview_caption(text))
 
     def _on_subagent_event(self, name, status):
         if self._active_turn is not None:
@@ -2175,6 +2249,7 @@ class ChatDock(QDockWidget):
                 "name": str(name), "status": str(status),
             })
         self._end_stream()
+        self._forget_last_text()
         if status == "started":
             if self._perf is not None:
                 self._perf["delegations"] += 1
@@ -2244,6 +2319,9 @@ class ChatDock(QDockWidget):
                     info["finished"] = True
         self._capture_terminal_snapshot(turn)
         self._set_activity("Ready.")
+        found = detect_question((turn or {}).get("last_text") or "")
+        if found is not None:
+            self._show_detected_question(found)
         task_id = (turn or {}).get("queue_task_id")
         task = self._queue_task(task_id) if task_id else None
         self._apply_turn_report(task, turn, _result)
@@ -2427,6 +2505,7 @@ class ChatDock(QDockWidget):
     def on_question_requested(self, payload):
         """Render one bridge-owned question without answering it implicitly."""
         self._end_stream()
+        self._forget_last_text()
         question_id = str(payload.get("question_id") or "")
         if (not question_id or question_id in self._live_questions
                 or str(payload.get("state") or "pending") != "pending"):
@@ -2463,6 +2542,8 @@ class ChatDock(QDockWidget):
             self._sync_queue_panel()
             self._notify_batch_attention(
                 "question", "QGent is asking a question")
+        else:
+            self._notify_question_attention(question)
 
         def answer(value, answer_kind):
             bridge = self.bridge
@@ -2542,6 +2623,63 @@ class ChatDock(QDockWidget):
                 reason=terminal_reason, resume_queue=False)
         return tuple(resolved or ())
 
+    def _forget_last_text(self):
+        if self._active_turn is not None:
+            self._active_turn["last_text"] = ""
+
+    def _show_detected_question(self, found):
+        """Render a question the agent left in prose as an answerable card."""
+        question_id = "detected-" + secrets.token_hex(6)
+        question = clipped_text(found.get("question", ""), 300)
+        options = tuple(clipped_text(option, 80)
+                        for option in (found.get("options") or []))
+        card = QuestionCard(question, options, True, self.t, detected=True)
+        card.answered.connect(
+            lambda value, kind, qid=question_id:
+            self._answer_detected_question(qid, value, kind))
+        self._detected_questions[question_id] = {
+            "card": card, "question": question, "options": options}
+        self._question_history[question_id] = card
+        self._add_widget(card)
+        self._history_append(
+            "question", event="requested", source="detected",
+            question_id=question_id, question=question,
+            options=list(options), allow_other=True)
+        self._notify_question_attention(question)
+        return card
+
+    def _answer_detected_question(self, question_id, value, answer_kind):
+        text = str(value or "").strip()
+        if not text or question_id not in self._detected_questions:
+            return
+        self._finalize_detected_question(question_id, text, answer_kind)
+        if (self._queue_running
+                or (self.backend is not None and self.backend.is_busy())):
+            self._enqueue_text(text)
+        else:
+            self._start_turn(text)
+
+    def _close_detected_questions(self, typed_text):
+        """A message typed into the composer is the reply to open questions."""
+        for question_id in list(self._detected_questions):
+            self._finalize_detected_question(question_id, typed_text, "typed")
+
+    def _finalize_detected_question(self, question_id, answer, answer_kind):
+        item = self._detected_questions.pop(question_id, None)
+        if item is None:
+            return False
+        answer = clipped_text(str(answer or ""), 300)
+        card = item.get("card")
+        if card is not None:
+            card.set_terminal("answered", answer=answer,
+                              answer_kind=answer_kind)
+        self._history_append(
+            "question", event="answered", source="detected",
+            question_id=question_id, question=item["question"],
+            options=list(item["options"]), allow_other=True, answer=answer,
+            answer_kind=answer_kind)
+        return True
+
     def _on_question_finished(self, payload):
         question_id = str(payload.get("question_id") or "")
         self._finalize_question(
@@ -2565,6 +2703,18 @@ class ChatDock(QDockWidget):
     def _notify_batch_attention(self, kind, message):
         """Fan one queue event out through every supported native channel."""
         kind = str(kind)
+        message = str(message)
+        channels = self._raise_attention(message)
+        record = {"kind": kind, "message": message,
+                  "channels": list(channels)}
+        self._notification_events.append(record)
+        self._history_append(
+            "queue", event="attention", attention_kind=kind,
+            message=message, channels=list(channels))
+        self._set_activity(message)
+
+    def _raise_attention(self, message):
+        """Message bar, taskbar flash and tray balloon; return channels used."""
         message = str(message)
         channels = []
         try:
@@ -2598,13 +2748,28 @@ class ChatDock(QDockWidget):
         except Exception:
             # Platform tray support is optional and deliberately silent.
             pass
-        record = {"kind": kind, "message": message,
-                  "channels": list(channels)}
-        self._notification_events.append(record)
-        self._history_append(
-            "queue", event="attention", attention_kind=kind,
-            message=message, channels=list(channels))
-        self._set_activity(message)
+        return channels
+
+    def _notify_question_attention(self, question):
+        """Make sure a question is seen, without nagging a user who is here.
+
+        A question blocks the agent (ask_user waits up to 15 minutes) or ends
+        the turn, so a hidden dock or a QGIS window in the background would
+        otherwise leave it unseen.
+        """
+        if not self.isVisible():
+            self.show()
+        self.raise_()
+        window = None
+        try:
+            window = self.iface.mainWindow()
+        except Exception:
+            pass
+        if window is not None and window.isActiveWindow():
+            return []
+        message = "QGent is asking: " + clipped_text(question, 120)
+        self._set_activity("QGent is waiting for your reply.")
+        return self._raise_attention(message)
 
     # ======================================================================
     # Message list helpers
@@ -2685,6 +2850,7 @@ class ChatDock(QDockWidget):
         self._live_approvals.clear()
         self._question_history.clear()
         self._live_questions.clear()
+        self._detected_questions.clear()
         self._stream_buf = ""
 
     # ======================================================================

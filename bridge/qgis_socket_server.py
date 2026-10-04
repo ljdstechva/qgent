@@ -174,6 +174,15 @@ class BridgeServer(QObject):
             if denied is not None:
                 return False, denied
 
+        if tool == "manage_layouts" and str(
+                (args or {}).get("action") or "") != "open":
+            shown = "manage_layouts " + json.dumps(
+                args, indent=1, ensure_ascii=False, default=str)[:4000]
+            denied = self._maybe_gate(
+                shown, reasons=safety.layout_reasons(args))
+            if denied is not None:
+                return False, denied
+
         payload = {"tool": tool, "args": args, "result": None,
                    "error": None, "event": threading.Event()}
         self.execute_requested.emit(payload)
@@ -277,9 +286,14 @@ class BridgeServer(QObject):
                     }
             self.question_finished.emit(terminal)
 
-    def _maybe_gate(self, code):
-        """Return a denial string if the user rejects, else None to proceed."""
-        reasons = safety.scan(code)
+    def _maybe_gate(self, code, reasons=None):
+        """Return a denial string if the user rejects, else None to proceed.
+
+        ``reasons`` defaults to the destructive-code scan of ``code``; tools
+        that are not code pass their own, with ``code`` as what the card shows.
+        """
+        if reasons is None:
+            reasons = safety.scan(code)
         with self._gate_lock:
             override = self._batch_permission_mode
         mode = override or config.get(config.K_PERMISSION_MODE)

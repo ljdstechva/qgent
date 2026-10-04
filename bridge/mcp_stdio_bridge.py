@@ -143,13 +143,125 @@ TOOLS = [
         },
     },
     {
+        "name": "layout_info",
+        "description": (
+            "Read-only print-layout inspector. action='list': project "
+            "layouts, layout presets, and every .qpt template QGIS can see "
+            "(the user template folder Layout Manager lists, layout search "
+            "paths, QGIS defaults, QGent bundled). action='describe' with "
+            "layout=<name> or template=<name|.qpt path>: pages, items (id, "
+            "type, rect_mm [x, y, w, h] on the page, text, map scale/CRS), "
+            "[placeholders], variables, and design issues — clipped text, "
+            "overflowing legend or table, items off the page or covering "
+            "grid labels, overlaps, unfilled placeholders. action='render' "
+            "with layout (page, dpi optional): PNG preview path — read the "
+            "image to check the design before calling it done."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string",
+                           "enum": ["list", "describe", "render"]},
+                "layout": {"type": "string",
+                           "description": "Print layout name."},
+                "template": {"type": "string",
+                             "description": "Template name or .qpt path "
+                                            "(describe only)."},
+                "page": {"type": "integer", "description": "1-based page."},
+                "dpi": {"type": "number",
+                        "description": "Preview resolution (default fits "
+                                       "~1400 px)."},
+            },
+            "required": ["action"],
+        },
+    },
+    {
+        "name": "manage_layouts",
+        "description": (
+            "Build and manage print layouts and layout templates without "
+            "writing PyQGIS. Read the layout-templates skill for the full "
+            "spec. Actions: "
+            "build — spec={name, mode:'create'|'update', preset?:"
+            "'side_panel'|'title_strip'|'report_figure', page?:{size:'A3', "
+            "orientation:'landscape'} or {width, height} mm, style?:{font, "
+            "accent, text_color, line_color, margin}, items:[...], fill?, "
+            "variables?, images?, replace?}. Items match by id and are "
+            "{id, type, rect:[x, y, w, h] mm from the page's top-left, "
+            "page?, frame?, background?, visible?, remove?} plus per type: "
+            "map{extent:'canvas'|'layer:Name'|[xmin,ymin,xmax,ymax], "
+            "scale?, crs?, layers?, grid?, overview?}, label{text with "
+            "[Placeholder] or [% expression %], font, align, valign}, "
+            "legend{map, title, columns, exclude, filter_by_map, "
+            "resize_to_contents}, scalebar{map, style, units}, "
+            "north_arrow{map}, picture{path}, rectangle/ellipse{fill, "
+            "stroke}, line{points}, table{rows, col_fractions}, "
+            "attribute_table{layer, columns}. Returns the layout with design "
+            "issues to fix. "
+            "save_template — layout, name?: writes <name>.qpt to the user "
+            "template folder that Layout Manager lists; maps and legends are "
+            "unpinned from this project's layers in the saved copy "
+            "(portable=false keeps them). In templates, write every "
+            "fill-in field as a [Field Name] placeholder (e.g. [Project "
+            "Name], [Prepared By], [Date]) — never blank lines — so "
+            "create_from_template can fill it. "
+            "create_from_template — template (name or .qpt) or "
+            "source_layout, layout_name, fill:{placeholder: text}, map?:"
+            "{extent, scale, crs, layers}. "
+            "export — layout, absolute path (.pdf/.png/.jpg/.tif/.svg), dpi?. "
+            "open — show the layout in the Layout Designer. "
+            "delete — layout. "
+            "replace/overwrite/delete ask the user for approval."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string",
+                           "enum": ["build", "save_template",
+                                    "create_from_template", "export",
+                                    "open", "delete"]},
+                "spec": {"type": "object",
+                         "description": "Layout spec for action=build."},
+                "layout": {"type": "string",
+                           "description": "Existing print layout name."},
+                "name": {"type": "string",
+                         "description": "Template name (save_template)."},
+                "folder": {"type": "string",
+                           "description": "Template folder override."},
+                "template": {"type": "string",
+                             "description": "Template name or .qpt path."},
+                "source_layout": {"type": "string",
+                                  "description": "Project layout to copy."},
+                "layout_name": {"type": "string",
+                                "description": "Name of the new layout."},
+                "fill": {"type": "object",
+                         "description": "[Placeholder] -> text."},
+                "variables": {"type": "object",
+                              "description": "Layout variables to set."},
+                "images": {"type": "object",
+                           "description": "Picture item id -> image path."},
+                "map": {"type": "object",
+                        "description": "Main-map overrides for "
+                                       "create_from_template."},
+                "path": {"type": "string",
+                         "description": "Absolute export path."},
+                "dpi": {"type": "number"},
+                "overwrite": {"type": "boolean"},
+                "replace": {"type": "boolean"},
+            },
+            "required": ["action"],
+        },
+    },
+    {
         "name": "ask_user",
         "description": (
             "Ask one structured clarifying question only when unresolved "
             "ambiguity would materially change the GIS outcome or safety. "
-            "Do not use this for minor preferences covered by stated defaults; "
-            "offer concrete choices instead of an open-ended question. For "
-            "a choice between project layers, always set allow_other=true."
+            "This is the only question the QGent panel can show and wait "
+            "for: never end a turn with a plain-text question you need "
+            "answered before continuing. Do not use this for minor "
+            "preferences covered by stated defaults; offer concrete choices "
+            "instead of an open-ended question. For a choice between project "
+            "layers, always set allow_other=true."
         ),
         "inputSchema": {
             "type": "object",

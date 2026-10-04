@@ -26,11 +26,18 @@ _ALLOWED_TOOLS = ",".join([
     "mcp__qgis__get_layer_features",
     "mcp__qgis__render_map_snapshot",
     "mcp__qgis__stat_path",
+    "mcp__qgis__layout_info",
+    "mcp__qgis__manage_layouts",
     "mcp__qgis__ask_user",
     "Task", "TodoWrite", "Read", "Glob", "Grep",
 ])
+# AskUserQuestion is Claude Code's own question prompt. Under ``-p`` there is
+# no terminal to show it in, so it is denied and the model falls back to a
+# plain-text question. Removing it leaves mcp__qgis__ask_user, which QGIS
+# renders as an answerable card, as the one way to ask.
 _DISALLOWED_TOOLS = ",".join([
     "Bash", "Write", "Edit", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch",
+    "AskUserQuestion",
 ])
 
 _FABLE_FALLBACK_NOTE = (

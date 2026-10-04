@@ -489,16 +489,24 @@ class ApprovalCard(QFrame):
 # Structured clarifying question
 # ===========================================================================
 class QuestionCard(QFrame):
-    """Two-to-five concrete choices with an optional inline Other answer."""
+    """Two-to-five concrete choices with an optional inline Other answer.
+
+    ``detected=True`` marks a question QGent found at the end of the agent's
+    reply rather than one asked through ``ask_user``: the agent is not
+    blocked waiting, so answering sends a new message. Such a card may have
+    no options at all, in which case its reply box is shown straight away.
+    """
 
     answered = pyqtSignal(str, str)  # answer, answer_kind (option | other)
 
-    def __init__(self, question, options, allow_other, tokens, parent=None):
+    def __init__(self, question, options, allow_other, tokens, parent=None,
+                 detected=False):
         super().__init__(parent)
         self.t = tokens
         self.question = str(question or "").strip()
         self.options = tuple(str(option or "").strip() for option in options)
         self.allow_other = bool(allow_other)
+        self.detected = bool(detected)
         self._terminal = False
         self._outcome = "pending"
         self._answer = ""
@@ -510,7 +518,8 @@ class QuestionCard(QFrame):
         layout.setContentsMargins(12, 10, 12, 10)
         layout.setSpacing(7)
 
-        self.head = QLabel("Clarification needed")
+        self.head = QLabel("QGent is waiting for your reply" if self.detected
+                           else "Clarification needed")
         self.head.setObjectName("QgentQuestionHead")
         layout.addWidget(self.head)
         self.question_label = QLabel(self.question)
@@ -536,13 +545,16 @@ class QuestionCard(QFrame):
         self.other_input = None
         self.other_submit = None
         if self.allow_other:
-            self.other_btn = QPushButton("Other…")
+            self.other_btn = QPushButton(
+                "Reply…" if self.detected else "Other…")
             self.other_btn.setObjectName("QgentQuestionOption")
             self.other_btn.setProperty("chosen", "false")
             self.other_btn.setProperty("muted", "false")
             self.other_btn.setCursor(Qt.PointingHandCursor)
             self.other_btn.clicked.connect(self._show_other)
             layout.addWidget(self.other_btn)
+            if not self.options:
+                self.other_btn.hide()
 
             self.other_row = QWidget()
             self.other_row.setObjectName("QgentQuestionOtherRow")
@@ -551,15 +563,18 @@ class QuestionCard(QFrame):
             row.setSpacing(6)
             self.other_input = QLineEdit()
             self.other_input.setObjectName("QgentQuestionOtherInput")
-            self.other_input.setPlaceholderText("Type a short answer")
-            self.other_submit = QPushButton("Submit")
+            self.other_input.setPlaceholderText(
+                "Type your reply" if self.detected else "Type a short answer")
+            self.other_submit = QPushButton(
+                "Send" if self.detected else "Submit")
             self.other_submit.setObjectName("QgentQuestionSubmit")
             self.other_submit.setCursor(Qt.PointingHandCursor)
             row.addWidget(self.other_input, 1)
             row.addWidget(self.other_submit)
             self.other_submit.clicked.connect(self._submit_other)
             self.other_input.returnPressed.connect(self._submit_other)
-            self.other_row.hide()
+            if self.options:
+                self.other_row.hide()
             layout.addWidget(self.other_row)
 
         self.answer_note = QLabel("")
@@ -635,7 +650,13 @@ class QuestionCard(QFrame):
             self.other_submit.setEnabled(False)
 
         suffix = " · restored from chat history" if restored else ""
-        if outcome == "answered":
+        if outcome == "answered" and self.detected:
+            typed = answer_kind == "typed"
+            self.head.setText("Replied in chat" if typed else "Replied")
+            if typed and self.other_row is not None and not self.options:
+                self.other_row.hide()
+            self.answer_note.setText("Reply: " + answer + suffix)
+        elif outcome == "answered":
             self.head.setText("Clarification answered")
             self.answer_note.setText("Answer: " + answer + suffix)
         elif outcome == "timeout":

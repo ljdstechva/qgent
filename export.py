@@ -386,8 +386,12 @@ def _question_block(source, terminal, stamp):
         "cancelled": "Cancelled",
         "requested": "Pending",
     }
+    detected = source.get("source") == "detected"
+    if detected:
+        labels["answered"] = "Replied"
     lines = [
-        "> **Clarification - {} - {}**".format(
+        "> **{} - {} - {}**".format(
+            "Question from QGent" if detected else "Clarification",
             labels.get(event, event.title()), stamp),
         ">",
         *_quote_lines(_stored_text(source.get("question", ""))),
@@ -397,19 +401,22 @@ def _question_block(source, terminal, stamp):
     options = source.get("options") or []
     if options:
         lines.extend("> - " + _one_line(option) for option in options)
-    else:
+    elif not detected:
         lines.append("> - (none recorded)")
     if source.get("allow_other", True):
-        lines.append("> - Other…")
+        lines.append("> - Free-text reply" if detected else "> - Other…")
     lines.extend([">", "> **Outcome**"])
     if event == "answered":
         lines.extend(_quote_lines(
-            "Answer: " + _stored_text(terminal.get("answer", ""))))
+            ("Reply: " if detected else "Answer: ")
+            + _stored_text(terminal.get("answer", ""))))
     elif event == "timeout":
         lines.append("> No answer — use the safest stated assumption.")
     elif event == "cancelled":
         reason = _one_line(terminal.get("reason")) or "Question cancelled."
         lines.append("> " + reason)
+    elif detected:
+        lines.append("> Awaiting the user's reply.")
     else:
         lines.append("> Pending — no answer was recorded.")
     return lines
