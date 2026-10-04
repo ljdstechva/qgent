@@ -263,6 +263,39 @@ assert not any("belongs to no table" in issue for issue in widened["issues"])
 step("table update keeps one frame and its rows",
      {"frames": len(frames), "rows": check_rows})
 tools.manage({"action": "build", "spec": {
+    "name": "Site Development Plan", "mode": "update",
+    "items": [{"id": "expr_table", "type": "table", "rect": [30, 60, 80, 14],
+               "rows": [["**Year**", "[% format_date(now(), 'yyyy') %]"],
+                        ["**Scale**", "1:[% 25000 %]"]]}]}})
+expressions = []
+for _ in range(2):
+    tools.manage({"action": "build", "spec": {
+        "name": "Site Development Plan", "mode": "update",
+        "items": [{"id": "expr_table", "rect": [30, 60, 90, 14]}]}})
+    table = [frame for frame in table_frames("Site Development Plan")
+             if frame.id() == "expr_table"][0].multiFrame()
+    expressions.append([
+        cell.content().expressionString() for row in table.tableContents()
+        for cell in row if hasattr(cell.content(), "expressionString")])
+assert len(expressions[1]) == 2, expressions
+assert expressions[0] == expressions[1], expressions
+assert expressions[1][0] == "format_date(now(), 'yyyy')", expressions
+tools.manage({"action": "build", "spec": {
+    "name": "Site Development Plan", "mode": "update",
+    "items": [{"id": "expr_table", "remove": True}]}})
+step("expression cells survive repeated updates unchanged", expressions[1])
+converted = tools.manage({"action": "build", "spec": {
+    "name": "Site Development Plan", "mode": "update",
+    "items": [{"id": "draft_stamp", "type": "table",
+               "rect": [30, 30, 60, 12], "rows": [["DRAFT", "v1"]]}]}})
+assert not converted.get("item_errors"), converted.get("item_errors")
+assert [item["type"] for item in converted["items"]
+        if item["id"] == "draft_stamp"] == ["table"]
+tools.manage({"action": "build", "spec": {
+    "name": "Site Development Plan", "mode": "update",
+    "items": [{"id": "draft_stamp", "remove": True}]}})
+step("label converted to table under the same id", True)
+tools.manage({"action": "build", "spec": {
     "name": "Bare map", "mode": "update",
     "items": [{"id": "gone_table", "type": "table", "rect": [20, 20, 60, 20],
                "rows": [["a", "b"]]}]}})

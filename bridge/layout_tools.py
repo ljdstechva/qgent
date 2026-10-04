@@ -1050,9 +1050,10 @@ def apply_item(layout, spec, iface=None):
         _item_type(existing) if existing is not None else "")).strip()
     if item_type in _TABLE_TYPES:
         if existing is not None:
-            # A table is rebuilt to change it; keep whatever the update does
-            # not mention, so moving or widening it cannot drop its rows.
-            spec = dict(_existing_table_spec(layout, existing), **spec)
+            if isinstance(existing, QgsLayoutFrame):
+                # A table is rebuilt to change it; keep whatever the update
+                # does not mention, so moving or widening it keeps its rows.
+                spec = dict(_existing_table_spec(layout, existing), **spec)
             _remove_item(layout, existing)
         return _build_table(layout, spec, item_type)
     cls = _TYPE_CLASSES.get(item_type)
@@ -2416,6 +2417,10 @@ def _valign(value):
 def _template_expression(text):
     """'1:[% expr %]' → "concat('1:', (expr))" for a table-cell property."""
     parts = re.split(r"\[%(.*?)%\]", text)
+    if len(parts) == 3 and not parts[0] and not parts[2]:
+        # A cell that is one expression stays that expression, so a table
+        # rebuilt from its own cells does not nest concat() each time.
+        return parts[1].strip()
     pieces = []
     for index, part in enumerate(parts):
         if index % 2:
