@@ -38,7 +38,10 @@ designing new templates.
    overrides. The response is the layout description with `issues`.
 4. **Fix every issue** with `build` in `mode: "update"`, patching only the
    items named. In a *template*, the only acceptable issue is
-   `unfilled placeholders` — those are the template's fields.
+   `unfilled placeholders` — those are the template's fields. When a preset
+   item does not fit your design, edit it (move, resize, re-text) rather
+   than deleting it; a map sheet always keeps a legend, a scale, and a north
+   arrow unless the user asked otherwise.
 5. **Look at it.** `layout_info {action: "render", layout}` and **read the PNG**.
    Check hierarchy, alignment, empty or crowded panels, legend content, and
    that nothing covers the map's grid labels. The lint cannot judge taste;

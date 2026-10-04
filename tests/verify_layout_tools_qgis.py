@@ -215,6 +215,18 @@ tools.manage({"action": "build", "spec": {
     "items": [{"id": "crowded_table", "remove": True},
               {"id": "draft_stamp", "text": "DRAFT"}]}})
 
+# 7b. A main map without legend, scale and north arrow is flagged.
+bare = tools.manage({"action": "build", "spec": {
+    "name": "Bare map", "page": {"size": "A4", "orientation": "landscape"},
+    "items": [{"id": "map_main", "type": "map", "rect": [10, 10, 277, 190],
+               "extent": "layer:Project Site Boundary"}]}})
+for needle in ("no legend", "no scale bar", "no north arrow"):
+    assert any(issue.startswith(needle) for issue in bare["issues"]), (
+        needle, bare["issues"])
+step("lint missing essentials", [issue for issue in bare["issues"]
+                                 if issue.startswith("no ")])
+tools.manage({"action": "delete", "layout": "Bare map"})
+
 # 8. Export a PDF and refuse to overwrite it silently.
 pdf = os.path.join(OUT, "site_development_plan.pdf")
 if os.path.exists(pdf):

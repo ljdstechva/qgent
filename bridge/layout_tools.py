@@ -716,9 +716,46 @@ def lint_layout(layout):
             if (overlap.width() > 1.0 and overlap.height() > 1.0
                     and not rect.contains(other) and not other.contains(rect)):
                 issues.append(f"'{label}' and '{other_label}' overlap")
+    issues.extend(_missing_essentials(layout, page_rects))
     placeholders = layout_placeholders(layout)
     if placeholders:
         issues.append("unfilled placeholders: " + ", ".join(placeholders))
+    return issues
+
+
+def _missing_essentials(layout, page_rects):
+    """A map sheet without legend, scale or north arrow is not finished.
+
+    Only for a *main* map (at least a quarter of its page): small figures
+    and decorative insets are left alone. Agents are told to fix every
+    issue, so these name the exception that justifies leaving one out.
+    """
+    visible = [item for item in layout.items()
+               if _is_content_item(item) and item.isVisible()]
+    page_area = max((page.width() * page.height() for page in page_rects),
+                    default=0.0)
+    main_maps = [item for item in visible
+                 if isinstance(item, QgsLayoutItemMap) and page_area
+                 and item.rect().width() * item.rect().height()
+                 >= 0.25 * page_area]
+    if not main_maps:
+        return []
+    issues = []
+    if not any(isinstance(item, QgsLayoutItemLegend) for item in visible):
+        issues.append(
+            "no legend — add one unless the user asked for none or the map "
+            "shows a single self-explanatory layer")
+    has_scale = any(isinstance(item, QgsLayoutItemScaleBar)
+                    for item in visible) or any(
+        isinstance(item, QgsLayoutItemLabel) and "map_scale" in item.text()
+        for item in visible)
+    if not has_scale:
+        issues.append("no scale bar or scale text — add one unless the user "
+                      "asked for none")
+    if not any(isinstance(item, QgsLayoutItemPicture)
+               and _item_type(item) == "north_arrow" for item in visible):
+        issues.append("no north arrow — add one unless the user asked for "
+                      "none or the map has a graticule and is north-up")
     return issues
 
 
