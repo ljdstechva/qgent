@@ -88,13 +88,13 @@ Common item keys: `id`, `type`, `rect`, `page`, `frame` (`true` or
 |---|---|
 | `map` | `extent`: `"canvas"`, `"layer:Name"` (`"layer:A|B"` combines), `[xmin, ymin, xmax, ymax]` + `extent_crs`; or `center: [lon, lat]` + `scale`; `scale` (else rounded up to a nice scale), `crs`, `layers`: `"visible"` (follow the project — use this in templates) or `[names]`; `grid`: `{style: cross\|solid\|markers\|frame_only, frame: ticks\|zebra\|line\|none, interval?, crs?: "EPSG:4326", format?: dms\|dm\|decimal, annotation_sides: [left, right, top, bottom], font_size}` (no `interval` = adapts to any scale); `overview: {of: "map_main"}` |
 | `label` | `text` (literal, `[Placeholder]`, `[% expression %]`), `font: {family, size, bold, italic, color}`, `align` left\|center\|right\|justify, `valign` top\|middle\|bottom, `margin`, `html` |
-| `legend` | `map`, `title`, `columns`, `exclude: [layers]`, `layers: [only these]`, `filter_by_map`, `resize_to_contents`, `font_sizes: {title, group, subgroup, item}`, `symbol_size: [w, h]` |
+| `legend` | `map`, `title`, `columns`, `exclude: [layers]`, `layers: [only these]`, `filter_by_map`, `hide_groups` (drop layer-group headings), `hide_band_labels` (drop raster rows like "Band 1 (Gray)", keep ramps/classes), `resize_to_contents`, `font_sizes: {title, group, subgroup, item}`, `symbol_size: [w, h]` |
 | `scalebar` | `map`, `style` (`Single Box`, `Double Box`, `Line Ticks Middle`, `Line Ticks Down`, `Line Ticks Up`, `stepped`, `hollow`, `Numeric`), `units` m\|km\|ft\|mi\|nmi, `segments`, `segments_left`, `segment_size` (else fitted to `rect` width), `bar_height`, `font`, `align` |
 | `north_arrow` | `map` (rotates with it), `path` (default QGIS arrow; or `arrows/NorthArrow_02.svg`), `north` grid\|true, `fill`, `stroke` |
 | `picture` | `path` (PNG/SVG/JPG; logos, seals) |
 | `rectangle` / `ellipse` | `fill`, `stroke`, `stroke_width`, `radius` |
 | `line` | `points: [[x, y], …]` in page mm, `stroke`, `stroke_width` |
-| `table` | `rows: [[cell, …], …]` (`"**bold**"`, `[Placeholder]`, `[% expression %]`), `col_fractions: [0.35, 0.65]`, `font`, `cell_margin`, `grid`, `grid_color`; rows spread to fill `rect` |
+| `table` | `rows: [[cell, …], …]` (`"**bold**"`, `[Placeholder]`, `[% expression %]`), `col_fractions: [0.35, 0.65]`, `font`, `cell_margin`, `grid`, `grid_color`; rows spread to fill `rect`. An update keeps every key it does not mention (e.g. send only `rect` to widen it) |
 | `attribute_table` | `layer`, `columns`, `max_rows`, `filter`, `font` |
 
 ## Presets (page-adaptive, A4 → A0)
@@ -137,7 +137,9 @@ Fonts and margins scale with paper size. Override any item by id.
 - Margins ≥ 7 mm; align panel contents to one left edge and one width.
 - Keep ~4 mm of paper clear outside a map frame on every side that shows
   grid labels; drop that side from `annotation_sides` when a panel is attached.
-- Legend: exclude basemaps and helper layers; title "LEGEND" or "Legend".
+- Legend: exclude basemaps and helper layers; title "LEGEND" or "Legend";
+  `hide_groups` when the project's layer groups are working folders, not
+  map categories; `hide_band_labels` for rasters.
 - Group the north arrow and scale bar; give the scale as a live 1:N label.
 - Philippine compliance sheets (DENR-EMB, ECC/EIA, WDP): title block with
   project, proponent, location (Brgy., Municipality, Province), prepared by

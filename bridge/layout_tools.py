@@ -39,7 +39,8 @@ from qgis.core import (
     QgsLayoutItemMapGrid, QgsLayoutItemPage, QgsLayoutItemPicture,
     QgsLayoutItemPolyline, QgsLayoutItemScaleBar, QgsLayoutItemShape,
     QgsLayoutMeasurement, QgsLayoutPoint, QgsLayoutSize, QgsLayoutUtils,
-    QgsLegendRenderer, QgsLegendStyle, QgsLineSymbol, QgsPrintLayout,
+    QgsLegendRenderer, QgsLegendStyle, QgsLineSymbol,
+    QgsMapLayerLegendUtils, QgsPrintLayout, QgsRasterLayer,
     QgsProject, QgsProperty, QgsReadWriteContext, QgsRectangle,
     QgsScaleBarSettings,
     QgsTableCell, QgsTextFormat, QgsUnitTypes,
@@ -694,6 +695,15 @@ def lint_layout(layout):
                 issues.append(f"picture '{label}' has no image path")
         if _is_overlay_item(item):
             boxes.append((label, rect))
+    live_owners = list(layout.multiFrames())
+    for item in layout.items():
+        if (isinstance(item, QgsLayoutFrame)
+                and not any(item.multiFrame() is owner
+                            for owner in live_owners)):
+            issues.append(
+                f"frame '{item.id() or 'frame'}' belongs to no table (left "
+                "over from an earlier edit) — remove it with {id, remove: "
+                "true}")
     for frame_owner in layout.multiFrames():
         frames = [frame for frame in frame_owner.frames() if frame.isVisible()]
         if not frames or not isinstance(frame_owner, (
@@ -1040,6 +1050,9 @@ def apply_item(layout, spec, iface=None):
         _item_type(existing) if existing is not None else "")).strip()
     if item_type in _TABLE_TYPES:
         if existing is not None:
+            # A table is rebuilt to change it; keep whatever the update does
+            # not mention, so moving or widening it cannot drop its rows.
+            spec = dict(_existing_table_spec(layout, existing), **spec)
             _remove_item(layout, existing)
         return _build_table(layout, spec, item_type)
     cls = _TYPE_CLASSES.get(item_type)
@@ -1437,7 +1450,9 @@ def _configure_legend(item, spec, layout, creating):
         item.setLegendFilterByMapEnabled(bool(spec["filter_by_map"]))
     exclude = spec.get("exclude") or []
     include = spec.get("layers")
-    if include is not None or exclude:
+    hide_groups = bool(spec.get("hide_groups"))
+    hide_bands = bool(spec.get("hide_band_labels"))
+    if include is not None or exclude or hide_groups or hide_bands:
         # Turning auto-update off gives the legend its own copy of the layer
         # tree, so the edits below can never touch the project's tree.
         item.setAutoUpdateModel(False)
@@ -1453,6 +1468,12 @@ def _configure_legend(item, spec, layout, creating):
                 parent = node.parent()
                 if parent is not None:
                     parent.removeChildNode(node)
+        if hide_groups:
+            for group in _legend_groups(root):
+                QgsLegendRenderer.setNodeLegendStyle(group,
+                                                     QgsLegendStyle.Hidden)
+        if hide_bands:
+            _drop_band_rows(item.model(), root)
     elif spec.get("auto_update") is not None:
         item.setAutoUpdateModel(bool(spec["auto_update"]))
     sizes = spec.get("font_sizes") or {}
@@ -1491,6 +1512,39 @@ def _configure_legend(item, spec, layout, creating):
     item.updateLegend()
     if item.resizeToContents():
         item.adjustBoxSize()
+
+
+_BAND_ROW = re.compile(r"^Band \d+\b")
+
+
+def _legend_groups(group):
+    """Every group below ``group`` (portable to QGIS without findGroups(True))."""
+    found = []
+    for child in group.children():
+        if child.nodeType() == child.NodeGroup:
+            found.append(child)
+            found.extend(_legend_groups(child))
+    return found
+
+
+def _drop_band_rows(model, root):
+    """Hide raster rows like 'Band 1 (Gray)', keeping ramps and classes.
+
+    A gray raster then shows its name over its colour ramp; an RGB image
+    shows just its name.
+    """
+    for node in root.findLayers():
+        if not isinstance(node.layer(), QgsRasterLayer):
+            continue
+        if QgsMapLayerLegendUtils.hasLegendNodeOrder(node):
+            continue
+        labels = [str(legend_node.data(Qt.DisplayRole) or "")
+                  for legend_node in model.layerLegendNodes(node)]
+        keep = [index for index, label in enumerate(labels)
+                if not _BAND_ROW.match(label)]
+        if len(keep) != len(labels):
+            QgsMapLayerLegendUtils.setLegendNodeOrder(node, keep)
+            model.refreshLayerLegend(node)
 
 
 # -- scale bar ---------------------------------------------------------------
@@ -1705,6 +1759,57 @@ def _build_table(layout, spec, kind):
     table.refresh()
     _apply_common(frame, spec)
     return frame
+
+
+def _existing_table_spec(layout, frame):
+    """The spec a rebuilt table needs to look like ``frame``'s table."""
+    owner = frame.multiFrame()
+    pages = layout.pageCollection()
+    position = pages.positionOnPage(frame.pos())
+    size = layout.convertToLayoutUnits(frame.sizeWithUnits())
+    spec = {
+        "rect": [round(position.x(), 2), round(position.y(), 2),
+                 round(size.width(), 2), round(size.height(), 2)],
+        "page": pages.pageNumberForPoint(frame.pos()) + 1,
+    }
+    if owner is None:
+        return spec
+    text_format = owner.contentTextFormat()
+    spec["font"] = {"family": text_format.font().family(),
+                    "size": round(text_format.size(), 2)}
+    spec["color"] = text_format.color().name()
+    spec["grid"] = owner.showGrid()
+    spec["grid_width"] = owner.gridStrokeWidth()
+    spec["grid_color"] = owner.gridColor().name()
+    if isinstance(owner, QgsLayoutItemManualTable):
+        spec["rows"] = [[_cell_spec(cell) for cell in row]
+                        for row in owner.tableContents()]
+        widths = list(owner.columnWidths())
+        if widths and all(width > 0 for width in widths):
+            spec["col_fractions"] = widths
+    elif isinstance(owner, QgsLayoutItemAttributeTable):
+        layer = owner.vectorLayer()
+        if layer is not None:
+            spec["layer"] = layer.id()
+        spec["columns"] = [column.attribute() for column in owner.columns()]
+        spec["max_rows"] = owner.maximumNumberOfFeatures()
+        if owner.filterFeatures() and owner.featureFilter():
+            spec["filter"] = owner.featureFilter()
+    return spec
+
+
+def _cell_spec(cell):
+    """A table cell back as spec text: '**bold**', '[% expr %]', or plain."""
+    content = cell.content()
+    if isinstance(content, QgsProperty):
+        text = "[% " + content.expressionString() + " %]"
+    else:
+        text = str(content if content is not None else "")
+    text_format = cell.textFormat()
+    bold = text_format.isValid() and (
+        text_format.font().bold()
+        or (hasattr(text_format, "forcedBold") and text_format.forcedBold()))
+    return f"**{text}**" if bold and text else text
 
 
 def _set_column_widths(table, spec, columns, width, margin, grid_width):
@@ -2127,10 +2232,20 @@ def _find_item(layout, item_id):
 
 
 def _remove_item(layout, item):
-    if isinstance(item, QgsLayoutFrame) and item.multiFrame() is not None:
-        layout.removeMultiFrame(item.multiFrame())
-    else:
+    """Remove an item; for a table, every frame it is drawn in.
+
+    ``removeMultiFrame`` only detaches the table's content — its frames stay
+    on the page as orphans — so the frames are removed as items, and the
+    table with them.
+    """
+    owner = item.multiFrame() if isinstance(item, QgsLayoutFrame) else None
+    if owner is None:
         layout.removeLayoutItem(item)
+        return
+    for frame in list(owner.frames()) or [item]:
+        layout.removeLayoutItem(frame)
+    if any(other is owner for other in layout.multiFrames()):
+        layout.removeMultiFrame(owner)
 
 
 def _target_map(layout, map_id=None, required=True):

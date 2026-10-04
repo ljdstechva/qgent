@@ -236,6 +236,87 @@ assert any("boxed_caption" in issue and "framed" in issue
            for issue in roomy["issues"]), roomy["issues"]
 step("lint mostly empty box", [issue for issue in roomy["issues"]
                                if "boxed_caption" in issue])
+
+# 7c. Tables: an update keeps one frame and its rows; remove leaves nothing.
+from qgis.core import QgsLayoutFrame  # noqa: E402
+
+
+def table_frames(name):
+    layout = project.layoutManager().layoutByName(name)
+    return [item for item in layout.items()
+            if isinstance(item, QgsLayoutFrame)]
+
+
+widened = tools.manage({"action": "build", "spec": {
+    "name": "Site Development Plan", "mode": "update",
+    "items": [{"id": "info_table", "rect": [300, 240, 110, 40]}]}})
+frames = table_frames("Site Development Plan")
+check_rows = next(item for item in widened["items"]
+                  if item["id"] == "info_table")["rows"]
+assert len(frames) == 1, [frame.id() for frame in frames]
+assert check_rows[0][1] == "Verde Laya Energy Corp.", check_rows
+label_format = frames[0].multiFrame().tableContents()[0][0].textFormat()
+assert label_format.isValid() and (
+    label_format.font().bold() or label_format.forcedBold()), \
+    "bold row labels were lost in the rebuild"
+assert not any("belongs to no table" in issue for issue in widened["issues"])
+step("table update keeps one frame and its rows",
+     {"frames": len(frames), "rows": check_rows})
+tools.manage({"action": "build", "spec": {
+    "name": "Bare map", "mode": "update",
+    "items": [{"id": "gone_table", "type": "table", "rect": [20, 20, 60, 20],
+               "rows": [["a", "b"]]}]}})
+tools.manage({"action": "build", "spec": {
+    "name": "Bare map", "mode": "update",
+    "items": [{"id": "gone_table", "remove": True}]}})
+assert not [frame for frame in table_frames("Bare map")
+            if frame.id() == "gone_table"]
+step("table remove leaves no frame", True)
+
+# 7d. Legend tidy: no group headings, no "Band 1 (Gray)" rows, and the
+#     project's own layer tree untouched.
+from osgeo import gdal, osr  # noqa: E402
+from qgis.core import (QgsLegendRenderer, QgsLegendStyle,  # noqa: E402
+                       QgsRasterLayer)
+
+gdal.UseExceptions()
+slope_path = os.path.join(OUT, "slope.tif")
+dataset = gdal.GetDriverByName("GTiff").Create(slope_path, 30, 30, 1,
+                                               gdal.GDT_Float32)
+dataset.SetGeoTransform([290000, 100, 0, 1622500, 0, -100])
+srs = osr.SpatialReference()
+srs.ImportFromEPSG(32651)
+dataset.SetProjection(srs.ExportToWkt())
+dataset.GetRasterBand(1).Fill(12.0)
+dataset = None
+slope = QgsRasterLayer(slope_path, "Slope")
+assert slope.isValid()
+project.addMapLayer(slope, False)
+topo_group = project.layerTreeRoot().addGroup("Topographic Map - Brgy. X")
+topo_group.addLayer(slope)
+tidy = tools.manage({"action": "build", "spec": {
+    "name": "Bare map", "mode": "update",
+    "items": [{"id": "tidy_legend", "type": "legend", "map": "map_main",
+               "rect": [200, 20, 80, 60], "hide_groups": True,
+               "hide_band_labels": True, "exclude": ["Philippines"]}]}})
+legend_item = project.layoutManager().layoutByName("Bare map") \
+    .itemById("tidy_legend")
+model = legend_item.model()
+legend_root = model.rootGroup()
+slope_node = legend_root.findLayer(slope.id())
+row_labels = [str(node.data(0) or "") for node in
+              model.layerLegendNodes(slope_node)]
+assert not any(label.startswith("Band ") for label in row_labels), row_labels
+hidden = [QgsLegendRenderer.nodeLegendStyle(group, legend_item.model())
+          == QgsLegendStyle.Hidden for group in legend_root.children()
+          if group.nodeType() == group.NodeGroup]
+assert hidden and all(hidden), hidden
+assert topo_group.customProperty("legend/title-style") in (None, ""), \
+    "project layer tree was modified"
+assert project.layerTreeRoot().findLayer(slope.id()) is not None
+step("legend hide_groups + hide_band_labels",
+     {"slope_rows": row_labels, "groups_hidden": hidden})
+
 tools.manage({"action": "delete", "layout": "Bare map"})
 
 # 8. Export a PDF and refuse to overwrite it silently.
