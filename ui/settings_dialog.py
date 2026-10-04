@@ -51,6 +51,11 @@ class SettingsDialog(QDialog):
         self._build()
         self._load()
         self._init_doctor()
+        self._update_manager = self.doctor_context.get("update_manager")
+        if self._update_manager is not None:
+            self._update_manager.models_changed.connect(self._refresh_discovered_models)
+            self._update_manager.changed.connect(self._update_model_refresh_state)
+        self._update_model_refresh_state()
 
     # ==================================================================
     # Construction
@@ -71,6 +76,9 @@ class SettingsDialog(QDialog):
         outer.addWidget(self.buttons)
 
     def _build_general_tab(self):
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
         page = QWidget()
         outer = QVBoxLayout(page)
 
@@ -103,6 +111,10 @@ class SettingsDialog(QDialog):
         self.model_preset = QComboBox()
         self._populate_model_presets("claude")
         mform.addRow("Preset", self.model_preset)
+        self.refresh_models_btn = QPushButton("Refresh models")
+        self.refresh_models_btn.setEnabled(self.doctor_context.get("update_manager") is not None)
+        self.refresh_models_btn.clicked.connect(self._check_model_updates)
+        mform.addRow("Model list", self.refresh_models_btn)
         self.fast_mode = QCheckBox("Use Fast mode for new turns")
         self.fast_mode.setToolTip(FAST_MODE_TOOLTIP)
         mform.addRow("Fast mode", self.fast_mode)
@@ -134,8 +146,8 @@ class SettingsDialog(QDialog):
         advanced_form.addRow(self.model_worker_label, worker_row)
         advanced_form.addRow(self.model_light_label, light_row)
         note = QLabel(
-            "Each model appears once. Choose Custom… only when you need to "
-            "enter an unlisted raw CLI model id.")
+            "Refresh models adds the choices reported by your installed CLIs. "
+            "Choose a model below, or use Custom… for an unlisted raw ID.")
         note.setWordWrap(True)
         note.setStyleSheet("color: palette(mid); font-size: 11px;")
         advanced_form.addRow(note)
@@ -183,7 +195,8 @@ class SettingsDialog(QDialog):
         aform.addRow("Motion", self.reduce_motion)
         outer.addWidget(ga)
         outer.addStretch(1)
-        return page
+        scroll.setWidget(page)
+        return scroll
 
     def _build_doctor_tab(self):
         scroll = QScrollArea()
@@ -350,6 +363,24 @@ class SettingsDialog(QDialog):
                 custom_edit.setVisible(show_raw)
         finally:
             self._loading_models = False
+
+    def _check_model_updates(self):
+        self._set_models_advanced_expanded(True)
+        if self._update_manager is not None:
+            self._update_manager.check(force=True)
+
+    def _update_model_refresh_state(self):
+        busy = bool(self._update_manager and self._update_manager.worker is not None)
+        self.refresh_models_btn.setEnabled(self._update_manager is not None and not busy)
+        self.refresh_models_btn.setText("Refreshing models…" if busy else "Refresh models")
+
+    def _refresh_discovered_models(self):
+        self._remember_visible_model_choices()
+        backend = self._active_model_backend
+        if backend:
+            self._populate_model_combos(backend)
+            # Refreshing data must not collapse Advanced or discard edits.
+            self.model_sup.setToolTip("Model choices refreshed from installed CLIs.")
 
     def _populate_model_presets(self, backend):
         """Rebuild the preset rows: not every preset applies to every backend."""
@@ -743,4 +774,8 @@ class SettingsDialog(QDialog):
         super().closeEvent(event)
 
     def shutdown(self):
+        if self._update_manager is not None:
+            self._update_manager.models_changed.disconnect(self._refresh_discovered_models)
+            self._update_manager.changed.disconnect(self._update_model_refresh_state)
+            self._update_manager = None
         self.updates.shutdown()

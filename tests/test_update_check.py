@@ -30,10 +30,23 @@ def setup(tmp_path):
         return json.dumps({"tag_name": "v2.2.0" if "anthropics" in url else "rust-v0.161.0",
                            "draft": False, "prerelease": False, "body": ""})
 
-    def run(path, args):
+    def run(path, args, *, stdin_text=None):
         calls.append(("run", args))
         if args == ["--version"]:
             return "2.1.287 (Claude Code)" if path == paths["claude"] else "codex-cli 0.160.0"
+        if args[0] == "--print":
+            assert "--safe-mode" in args and "--no-session-persistence" in args
+            request = json.loads(stdin_text)
+            assert request["type"] == "control_request"
+            assert request["request"]["subtype"] == "initialize"
+            assert "prompt" not in request
+            model = Path(path).read_text().split()[0]
+            return json.dumps({"type": "control_response", "response": {
+                "subtype": "success", "request_id": request["request_id"],
+                "response": {"models": [
+                    {"value": model, "displayName": model},
+                    {"value": "opus", "displayName": "Opus 7"}],
+                    "account": {"private": "must not persist"}}}})
         assert args == ["debug", "models"]
         return json.dumps({"models": [
             {"slug": "gpt-6.1-sol", "visibility": "list"},
@@ -61,7 +74,12 @@ def test_versions_and_candidate_provenance(setup):
     assert len(report["notices"]) == 7
     assert not report["errors"]
     assert "No software is installed" in updates.report_text(report)
-    assert all(args in (["--version"], ["debug", "models"]) for kind, args in calls if kind == "run")
+    assert all(args in (["--version"], ["debug", "models"]) or args[0] == "--print"
+               for kind, args in calls if kind == "run")
+    assert report["models"]["claude"]["source"] == "Claude Code model catalog"
+    assert {row["id"] for row in report["models"]["codex"]["entries"]} == {
+        "gpt-5.5", "gpt-5.6-sol", "gpt-6-astra", "gpt-6.1-sol"}
+    assert "must not persist" not in json.dumps(report)
     assert updates.version_tuple("rust-v0.160.10") > updates.version_tuple("0.160.9")
     for invalid in ("v1.2.3-beta.1", "1.2", "garbage", "1.2.3\nextra"):
         with pytest.raises(ValueError):
@@ -197,9 +215,10 @@ def test_structured_catalog_preserves_exact_future_slugs():
         {"slug": "gpt-5.6-sol", "visibility": "list"},
         {"slug": "gpt-7-secret", "visibility": "hide"},
     ]}
-    ids, hidden = updates.codex_catalog("fixture", lambda *_: json.dumps(payload))
+    ids, hidden, entries = updates.codex_catalog("fixture", lambda *_: json.dumps(payload))
     assert ids == ["future-model-preview", "gpt-7-codex-mini"]
     assert hidden == {"gpt-7-secret"}
+    assert "gpt-7-secret" not in {row["id"] for row in entries}
 
 
 def test_hidden_catalog_slug_cannot_return_via_release_notes(setup):
@@ -216,6 +235,27 @@ def test_hidden_catalog_slug_cannot_return_via_release_notes(setup):
     assert "gpt-7-secret" not in report["models"]["codex"]["release_ids"]
     assert all("gpt-7-secret" not in notice for notice in report["notices"])
     assert "gpt-7-secret" not in updates.report_text(report)
+    assert "gpt-7-secret" not in {row["id"] for row in report["models"]["codex"]["entries"]}
+
+
+def test_claude_catalog_failure_keeps_candidates_unselectable(setup):
+    _, _, _, _, check = setup
+    def unavailable(*_args, **_kwargs):
+        raise ValueError("Unavailable")
+    report = check(runner=unavailable)
+    assert "entries" not in report["models"]["claude"]
+    assert "entries" not in report["models"]["codex"]
+    assert any("Claude model catalog unavailable" in error for error in report["errors"])
+
+
+@pytest.mark.parametrize("models", [[None], [{}], [{"value": 42, "slug": 42}], [{"value": "", "slug": ""}]])
+def test_malformed_catalog_is_not_a_successful_empty_refresh(models):
+    with pytest.raises(ValueError):
+        updates.codex_catalog("fixture", lambda *_: json.dumps({"models": models}))
+    response = {"type": "control_response", "response": {
+        "subtype": "success", "request_id": "qgent-models", "response": {"models": models}}}
+    with pytest.raises(ValueError):
+        updates.claude_catalog("fixture", lambda *_, **__: json.dumps(response))
 
 
 def test_dismissal_during_report_save_is_not_lost(setup, monkeypatch):

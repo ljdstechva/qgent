@@ -10,6 +10,7 @@ from pathlib import Path
 import sys
 import tempfile
 import threading
+import subprocess
 from unittest.mock import patch
 
 
@@ -101,8 +102,15 @@ def main():
                 "claude": {"installed": "2.1.287", "latest": "v2.1.289", "update": True, "error": ""},
                 "codex": {"installed": "0.160.0", "latest": "rust-v0.160.0", "update": False, "error": ""}},
             "models": {
-                "claude": {"ids": [], "source": "installed CLI strings (unconfirmed)"},
-                "codex": {"ids": ["gpt-6-astra", "gpt-6.1-sol"], "source": "Codex model catalog"}},
+                "claude": {"ids": [], "source": "Claude Code model catalog", "entries": [
+                    {"id": "sonnet", "label": "Sonnet 5.5"},
+                    {"id": "opus", "label": "Opus 5.5"},
+                    {"id": "fable", "label": "Fable 5.1"},
+                    {"id": "claude-opus-5", "label": "Opus 5"}]},
+                "codex": {"ids": ["gpt-6-astra", "gpt-6.1-sol"], "source": "Codex model catalog", "entries": [
+                    {"id": "gpt-6-astra", "label": "gpt-6-astra"},
+                    {"id": "gpt-6.1-sol", "label": "gpt-6.1-sol"},
+                    {"id": "gpt-5.6-sol", "label": "gpt-5.6-sol"}]}},
             "errors": [],
         }
         report["notices"] = core.notice_ids(report)
@@ -118,6 +126,10 @@ def main():
         verify("automatic_enabled_by_default", dialog.updates.automatic.isChecked())
         verify("manual_menu_registered", plugin.update_action in iface.actions)
         verify("empty_state", "No update check yet" in dialog.updates.details.toPlainText())
+        # An in-flight refresh must preserve edits not yet saved with OK.
+        dialog.model_sup.setCurrentIndex(dialog.model_sup.findData(config.CUSTOM_MODEL_SENTINEL))
+        dialog.model_sup_custom.setText("my-unsaved-model")
+        dialog._mark_raw_model_edited("supervisor")
 
         gate = threading.Event()
         worker_threads = []
@@ -131,11 +143,12 @@ def main():
         heartbeat.timeout.connect(lambda: ticks.append(True))
         heartbeat.start(10)
         with patch.object(ui, "check_updates", fixture_check), patch.object(config, "detect_claude", return_value=""), patch.object(config, "detect_codex", return_value=""):
-            dialog.updates.check_button.click()
+            dialog.refresh_models_btn.click()
             running = manager.worker
             manager.check(force=True)
             verify("concurrent_checks_coalesced", manager.worker is running)
             verify("loading_state", not dialog.updates.check_button.isEnabled())
+            verify("general_refresh_loading_state", not dialog.refresh_models_btn.isEnabled())
             QTimer.singleShot(150, gate.set)
             drain(manager)
         heartbeat.stop()
@@ -143,11 +156,28 @@ def main():
         verify("ui_remains_responsive", len(ticks) >= 2)
         verify("completion_enables_manual_check", dialog.updates.check_button.isEnabled())
         verify("new_models_rendered", "gpt-6.1-sol" in dialog.updates.details.toPlainText())
+        verify("unsaved_custom_model_preserved", dialog.model_sup_custom.text() == "my-unsaved-model")
+        verify("claude_labels_refreshed", dialog.model_sup.itemText(dialog.model_sup.findData("opus")) == "Opus 5.5")
+        verify("claude_long_context_label_refreshed", dialog.model_sup.itemText(dialog.model_sup.findData("sonnet[1m]")) == "Sonnet 5.5 (1M context)")
+        verify("unconfirmed_internal_model_excluded", dialog.model_sup.findData("claude-eval-9") == -1)
         verify("notification_visible", plugin._update_notice is not None)
         verify("model_choices_unchanged", before_models == {
             name: {role: config.get_model_choice(name, role) for role in config.MODEL_ROLES}
             for name in ("claude", "codex")})
         dialog.grab().save(str(args.evidence / "updates-success.png"))
+        dialog.tabs.setCurrentIndex(0)
+        dialog._set_models_advanced_expanded(True)
+        app.processEvents()
+        verify("advanced_model_rows_not_clipped", dialog.models_advanced_container.height() >= 100)
+        dialog.grab().save(str(args.evidence / "models-claude.png"))
+        dialog.backend.setCurrentIndex(dialog.backend.findData("codex"))
+        dialog._set_models_advanced_expanded(True)
+        verify("new_codex_models_in_general", dialog.model_sup.findData("gpt-6.1-sol") >= 0 and dialog.model_sup.findData("gpt-6-astra") >= 0)
+        dialog.model_sup.setCurrentIndex(dialog.model_sup.findData("gpt-6.1-sol"))
+        verify("new_model_is_normal_choice", dialog.model_sup.currentData() != config.CUSTOM_MODEL_SENTINEL)
+        app.processEvents()
+        dialog.grab().save(str(args.evidence / "models-codex.png"))
+        dialog.tabs.setCurrentWidget(dialog.updates)
 
         # A replacement notification must not be cleared by the old widget's destruction.
         previous = plugin._update_notice
@@ -170,6 +200,9 @@ def main():
         dialog.grab().save(str(args.evidence / "updates-error.png"))
         dialog.updates.automatic.setChecked(False)
         dialog._save_and_accept()
+        verify("new_model_saved_exactly", config.get_model_choice("codex")["model_id"] == "gpt-6.1-sol")
+        verify("backend_accepts_discovered_model", config.validate_model_choice("codex")["model_id"] == "gpt-6.1-sol" and not config.validate_model_choice("codex")["reset"])
+        verify("pinned_claude_version_not_remapped", config.normalize_model_id("claude", "claude-opus-5") == "claude-opus-5")
         verify("automatic_preference_persists", not config.get(config.K_CHECK_UPDATES))
         with patch.object(manager, "check") as check:
             manager.check_automatic()
@@ -177,6 +210,43 @@ def main():
         with patch.object(settings.SettingsDialog, "_init_doctor", lambda self: None):
             reopened = settings.SettingsDialog(doctor_context={"update_manager": manager})
         verify("reopened_preference_preserved", not reopened.updates.automatic.isChecked())
+        verify("reopened_discovered_selection", reopened.model_sup.currentData() == "gpt-6.1-sol")
+        verify("reopened_catalog_preserved", reopened.model_sup.findData("gpt-6-astra") >= 0)
+        child_code = '''import sys,json
+from pathlib import Path
+from qgis.PyQt.QtCore import QCoreApplication,QSettings
+app=QCoreApplication([])
+app.setOrganizationName("QGentUpdateTest")
+app.setApplicationName("IsolatedUpdates")
+QSettings.setDefaultFormat(QSettings.IniFormat)
+QSettings.setPath(QSettings.IniFormat,QSettings.UserScope,sys.argv[1])
+sys.path.insert(0,str(Path(sys.argv[2]).parent))
+import importlib
+config=importlib.import_module(Path(sys.argv[2]).name+".config")
+assert "gpt-6.1-sol" in config.model_ids("codex")
+choice=config.validate_model_choice("codex",persist=False)
+assert choice["model_id"]=="gpt-6.1-sol" and not choice["reset"]
+assert dict((i,label) for label,i in config.model_options("claude"))["opus"]=="Opus 5.5"
+print("FRESH PROCESS CATALOG RESTORE: PASS")
+'''
+        restored = subprocess.run([sys.executable, "-B", "-c", child_code, temporary, str(args.plugin_root)],
+                                  capture_output=True, text=True, timeout=15,
+                                  creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        verify("catalog_and_selection_survive_fresh_process", restored.returncode == 0 and "RESTORE: PASS" in restored.stdout)
+        # A failed discovery must retain the last known valid list.
+        saved_ids = config.model_ids("codex")
+        failed_catalog = json.loads(json.dumps(incomplete))
+        failed_catalog["models"] = {name: {"ids": [], "source": "unconfirmed"} for name in ("claude", "codex")}
+        manager._complete(failed_catalog)
+        verify("failed_discovery_retains_catalog", config.model_ids("codex") == saved_ids)
+        config.set_discovered_models("codex", [{"id": "gpt-6-astra", "label": "GPT-6 Astra"}])
+        verify("removed_model_not_advertised", "gpt-6.1-sol" not in config.model_ids("codex"))
+        verify("removed_selection_not_silently_reset", config.validate_model_choice("codex", persist=False)["model_id"] == "gpt-6.1-sol")
+        config.set_discovered_models("codex", report["models"]["codex"]["entries"])
+        config.set(config.K_MODEL_CATALOG + "codex", json.dumps({
+            "entries": report["models"]["codex"]["entries"], "seen": 42}))
+        config.set_discovered_models("codex", report["models"]["codex"]["entries"])
+        verify("malformed_history_repaired", config.normalize_model_id("codex", "gpt-6.1-sol") == "gpt-6.1-sol")
         reopened.updates.automatic.setChecked(True)
         reopened.reject()
         verify("cancel_does_not_save_preference", not config.get(config.K_CHECK_UPDATES))

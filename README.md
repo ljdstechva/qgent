@@ -10,7 +10,7 @@
 
 <p align="center">
   <img alt="QGIS 3.28+" src="https://img.shields.io/badge/QGIS-3.28%2B-589632?logo=qgis&logoColor=white">
-  <img alt="QGent 0.3.0" src="https://img.shields.io/badge/QGent-0.3.0-0f9d91">
+  <img alt="QGent 0.3.1" src="https://img.shields.io/badge/QGent-0.3.1-0f9d91">
   <img alt="Claude Code or Codex" src="https://img.shields.io/badge/backend-Claude%20Code%20%7C%20Codex-5b5bd6">
   <img alt="Experimental" src="https://img.shields.io/badge/status-experimental-orange">
 </p>
@@ -132,14 +132,23 @@ while QGIS remains open. Open **Settings → Updates** or
 tab also lets you disable automatic checks (save with **OK**) or dismiss the
 current notifications; a later release or newly detected model is still reported.
 
+**General → Models → Refresh models** updates the dropdowns immediately.
+Successful background checks do the same. Claude's current alias labels (for
+example, the installed CLI's current Sonnet and Opus versions) and both backends'
+new model choices are saved in your QGIS profile and restored after restarting.
+Your selected models and unsaved edits stay as selected; you can choose a newly
+listed model under **Advanced** without typing a raw ID.
+
 Checks compare QGent's installed version against `metadata.txt` on this
 repository's `main` branch and Claude Code/Codex versions against their latest
-stable GitHub releases. New model candidates come from installed CLI strings,
-release-note mentions and, on recent Codex versions, `codex debug models`.
-Older Codex builds fall back to the string scan and show that limitation.
-Hidden Codex catalog entries are excluded. Discovery does not guarantee account
-access; review the provider's release notes and use **General → Models →
-Advanced → Custom…** for a supported ID that is not in QGent's list yet.
+stable GitHub releases. Selectable models come from `codex debug models` and
+Claude Code's Agent SDK initialization response, without sending a prompt.
+The Claude metadata process disables hooks, plugins, MCP servers and tools.
+Only these structured catalogs update the dropdowns; unconfirmed binary strings
+and release-note mentions remain informational. Hidden Codex entries are excluded.
+If a CLI cannot provide its catalog, QGent keeps the last saved choices and shows
+the error. Discovery does not guarantee account access. **Custom…** remains
+available for an explicitly chosen raw model ID.
 
 The feature notifies you and links to installation/release instructions; it
 does not install software or change your selected models. Checks make public
@@ -245,7 +254,7 @@ project information.
 
 ## Status and feedback
 
-QGent 0.3.0 is experimental. CLI event formats and flags can change, and the
+QGent 0.3.1 is experimental. CLI event formats and flags can change, and the
 plugin has not yet been published in the official QGIS plugin repository.
 
 Bug reports and focused feature requests are welcome in

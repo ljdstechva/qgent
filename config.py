@@ -6,6 +6,7 @@ they survive QGIS restarts and are shared across projects. CLI paths are
 autodetected once and cached, but always overridable in the settings dialog.
 """
 import glob
+import json
 import os
 import shutil
 import sys
@@ -16,9 +17,12 @@ from .model_catalog import (
     CUSTOM_MODEL_SENTINEL, LIGHT_ROLE_TOOLTIP, MODEL_CATALOG, MODEL_DEFAULTS,
     MODEL_IDS_BY_BACKEND, MODEL_PRESET_CUSTOM, MODEL_PRESET_LONG_CONTEXT,
     MODEL_PRESET_MAX_QUALITY,
-    MODEL_PRESET_SPEED, MODEL_ROLES, accepted_model_ids,
-    classify_model_preset, default_model, model_ids, model_options,
-    model_preset_options, model_preset_values, normalize_model_id,
+    MODEL_PRESET_SPEED, MODEL_ROLES,
+    accepted_model_ids as _bundled_accepted_model_ids,
+    classify_model_preset, clean_model_entries, default_model,
+    model_ids as _bundled_model_ids, model_options as _bundled_model_options,
+    model_preset_options, model_preset_values,
+    normalize_model_id as _bundled_normalize_model_id,
     repair_model_specs,
 )
 
@@ -52,6 +56,7 @@ K_REDUCE_MOTION = "reduce_motion"
 K_SHOW_MAP_SNAPSHOTS = "show_map_snapshots"
 K_FAST_MODE = "fast_mode"
 K_CHECK_UPDATES = "check_updates"
+K_MODEL_CATALOG = "discovered_model_catalog_"
 
 MODEL_SETTINGS_VERSION = 2
 
@@ -257,7 +262,74 @@ def validate_model_choice(backend, role="supervisor", persist=True):
     }
 
 
+# --- Discovered model catalogs --------------------------------------------
+
+def _catalog_cache(backend):
+    settings = _settings()
+    raw = settings.value(K_MODEL_CATALOG + backend, "{}")
+    settings.endGroup()
+    try:
+        cache = json.loads(str(raw))
+        if not isinstance(cache, dict) or "entries" not in cache:
+            return {}
+        cache["entries"] = clean_model_entries(cache.get("entries", []))
+        seen = cache.get("seen", [])
+        cache["seen"] = [item for item in seen if isinstance(item, str)] if isinstance(seen, list) else []
+        return cache
+    except (TypeError, ValueError):
+        return {}
+
+
+def discovered_models(backend):
+    return _catalog_cache(backend).get("entries")
+
+
+def set_discovered_models(backend, entries):
+    """Persist only structured CLI choices; remember previously valid selections."""
+    if backend not in ("claude", "codex"):
+        raise ValueError("Unknown model backend")
+    entries = clean_model_entries(entries)
+    previous = _catalog_cache(backend)
+    seen = previous.get("seen", [])
+    seen = {item for item in seen if isinstance(item, str)}
+    seen.update(_bundled_model_ids(backend))
+    seen.update(row["id"] for row in entries)
+    settings = _settings()
+    settings.setValue(K_MODEL_CATALOG + backend, json.dumps(
+        {"entries": entries, "seen": sorted(seen)}, ensure_ascii=False))
+    settings.sync()
+    status = settings.status()
+    settings.endGroup()
+    if status != QSettings.NoError:
+        raise OSError("Could not save the discovered model catalog")
+
+
+def model_ids(backend):
+    return _bundled_model_ids(backend, discovered_models(backend))
+
+
+def model_options(backend):
+    return _bundled_model_options(backend, discovered_models(backend))
+
+
+def accepted_model_ids(backend):
+    return _bundled_accepted_model_ids(backend, discovered_models(backend))
+
+
+def normalize_model_id(backend, value):
+    cache = _catalog_cache(backend)
+    if value in cache.get("seen", []):
+        return str(value)
+    normalized = _bundled_normalize_model_id(backend, value, cache.get("entries"))
+    if normalized:
+        return normalized
+    # A provider removing an entry must not silently reset a user's selection.
+    # Removed choices are shown through the existing raw-ID UI, not advertised.
+    return ""
+
+
 # --- CLI autodetection -----------------------------------------------------
+
 def _which(*names):
     for name in names:
         found = shutil.which(name)

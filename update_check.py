@@ -16,10 +16,10 @@ import time
 from urllib.request import Request, urlopen
 
 try:
-    from .model_catalog import accepted_model_ids
+    from .model_catalog import accepted_model_ids, clean_model_entries
     from .model_watch import check_models, cli_signature, new_model_ids, models_in_text
 except ImportError:  # standalone checks
-    from model_catalog import accepted_model_ids
+    from model_catalog import accepted_model_ids, clean_model_entries
     from model_watch import check_models, cli_signature, new_model_ids, models_in_text
 
 
@@ -100,7 +100,7 @@ def fetch_text(url):
     return data.decode("utf-8")
 
 
-def run_cli(path, args):
+def run_cli(path, args, *, stdin_text=None):
     environment = os.environ.copy()
     if os.name == "nt":
         # QGIS's launcher trims PATH; npm CLI shims still need Node.js.
@@ -109,10 +109,13 @@ def run_cli(path, args):
         if node.is_dir():
             directories.append(str(node))
         environment["PATH"] = os.pathsep.join(directories + [environment.get("PATH", "")])
-    result = subprocess.run(
-        [str(path), *args], capture_output=True, text=True, encoding="utf-8",
-        errors="replace", timeout=12, check=False, env=environment,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    # Metadata discovery runs outside the project, with no user prompt.
+    with tempfile.TemporaryDirectory(prefix="qgent-models-") as directory:
+        result = subprocess.run(
+            [str(path), *args], capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=15, check=False, env=environment,
+            input=stdin_text, cwd=directory,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     if result.returncode:
         # Don't persist raw stderr: a CLI may include account/config information.
         raise ValueError("CLI command failed (exit %s)" % result.returncode)
@@ -132,14 +135,54 @@ def codex_catalog(path, runner):
     payload = json.loads(runner(path, ["debug", "models"]))
     if not isinstance(payload, dict) or not isinstance(payload.get("models"), list):
         raise ValueError("Unrecognized Codex model catalog")
-    rows = [row for row in payload["models"]
-            if isinstance(row, dict) and isinstance(row.get("slug"), str)
-            and row["slug"]]
+    rows = payload["models"]
+    if any(not isinstance(row, dict) or not isinstance(row.get("slug"), str)
+           or not row["slug"] for row in rows):
+        raise ValueError("Invalid Codex model catalog entry")
     hidden = {row["slug"] for row in rows if row.get("visibility") != "list"}
     # Structured slugs are authoritative: the fallback binary regex cannot
     # anticipate future families, multi-part suffixes or non-GPT model names.
     visible = {row["slug"] for row in rows if row.get("visibility") == "list"}
-    return sorted(visible - hidden - set(accepted_model_ids("codex"))), hidden
+    entries = clean_model_entries([
+        {"id": row["slug"], "label": row.get("display_name") or row["slug"]}
+        for row in rows if row["slug"] in visible - hidden])
+    return sorted(visible - hidden - set(accepted_model_ids("codex"))), hidden, entries
+
+
+def claude_catalog(path, runner):
+    """Use the Agent SDK initialize handshake, without an inference prompt.
+
+    Protocol: anthropics/claude-agent-sdk-python, _internal/query.py.
+    Safe mode disables hooks/plugins; no tools, MCP servers or session files.
+    """
+    request = {"type": "control_request", "request_id": "qgent-models",
+               "request": {"subtype": "initialize", "hooks": {}}}
+    text = runner(path, [
+        "--print", "--input-format", "stream-json", "--output-format", "stream-json",
+        "--verbose", "--no-session-persistence", "--safe-mode",
+        "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+        "--tools", "", "--setting-sources", "",
+    ], stdin_text=json.dumps(request) + "\n")
+    for line in text.splitlines():
+        payload = json.loads(line)
+        if not isinstance(payload, dict) or payload.get("type") != "control_response":
+            continue
+        response = payload.get("response", {})
+        if response.get("request_id") != "qgent-models":
+            continue
+        if response.get("subtype") != "success":
+            raise ValueError("Claude model discovery failed")
+        models = response.get("response", {}).get("models")
+        if not isinstance(models, list) or not models:
+            raise ValueError("Claude returned no structured model catalog")
+        if any(not isinstance(row, dict) or not isinstance(row.get("value"), str)
+               or not row["value"] for row in models):
+            raise ValueError("Invalid Claude model catalog entry")
+        # Do not retain the handshake's account details or any other fields.
+        return clean_model_entries([
+            {"id": row["value"], "label": row.get("displayName") or row["value"]}
+            for row in models])
+    raise ValueError("Claude returned no model initialization response")
 
 
 def _dismissed(state):
@@ -238,17 +281,29 @@ def check_updates(profile_dir, plugin_dir, cli_paths, force=False, *,
     hidden_codex = set()
     if cli_paths.get("codex"):
         try:
-            ids, hidden_codex = codex_catalog(cli_paths["codex"], runner)
-            report["models"]["codex"].update(ids=ids, source="Codex model catalog")
+            ids, hidden_codex, entries = codex_catalog(cli_paths["codex"], runner)
+            report["models"]["codex"].update(ids=ids, entries=entries, source="Codex model catalog")
         except Exception as exc:
             report["errors"].append(
                 f"Codex model catalog unavailable ({type(exc).__name__}); using unconfirmed CLI strings. "
                 "Older Codex versions may need an update.")
+    if cancelled():
+        return None
+    if cli_paths.get("claude"):
+        try:
+            entries = claude_catalog(cli_paths["claude"], runner)
+            ids = sorted({row["id"] for row in entries} - set(accepted_model_ids("claude")))
+            report["models"]["claude"].update(ids=ids, entries=entries, source="Claude Code model catalog")
+        except Exception as exc:
+            report["errors"].append(
+                f"Claude model catalog unavailable ({type(exc).__name__}); "
+                "keeping the saved model choices. CLI strings remain unconfirmed.")
     for name, row in report["models"].items():
         if name == "codex":
             row["release_ids"] = sorted(set(row.get("release_ids", [])) - hidden_codex)
-        row["ids"] = sorted(set(row["ids"]) | set(row.get("release_ids", [])))
-        if row.get("release_ids"):
+        if "entries" not in row:
+            row["ids"] = sorted(set(row["ids"]) | set(row.get("release_ids", [])))
+        if row.get("release_ids") and "entries" not in row:
             row["source"] += " / release-note mentions"
     report["notices"] = [item for item in notice_ids(report) if item not in _dismissed(state)]
     if cancelled():
@@ -280,13 +335,18 @@ def report_text(report):
             status = "Optional backend not installed"
         source = "GitHub main" if name == "qgent" else "latest release"
         lines.append(f"{LABELS[name]}: {installed} → {latest} ({source}) — {status}")
-    lines.extend(["", "Models not yet listed in QGent:"])
+    lines.extend(["", "Model choices:"])
     for name, row in report["models"].items():
-        lines.append(f"{LABELS[name]} ({row['source']}): " + (", ".join(row["ids"]) or "none detected"))
+        if "entries" in row:
+            labels = ", ".join(entry["label"] for entry in row["entries"])
+            lines.append(f"{LABELS[name]} (CLI model catalog): {labels}")
+        else:
+            lines.append(f"{LABELS[name]} ({row['source']}): " + (", ".join(row["ids"]) or "none detected"))
         if row.get("release_ids"):
             lines.append("  Mentioned in latest release notes (unconfirmed): " + ", ".join(row["release_ids"]))
-    lines.extend(["", "Model discovery does not guarantee account access. Review the release notes, then use",
-                  "General → Models → Advanced → Custom… to enter a supported model ID.",
+    lines.extend(["", "CLI catalog models are added to General → Models → Advanced automatically.",
+                  "Saved model choices stay available after restart. Unconfirmed strings are not added.",
+                  "Model discovery does not guarantee account access.",
                   "Existing model choices stay as selected. No software is installed by this check.",
                   "For QGent, follow its installation link and replace the plugin while QGIS is closed."])
     if report["errors"]:

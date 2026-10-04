@@ -12,7 +12,7 @@ from model_catalog import (  # noqa: E402
     MODEL_PRESET_CUSTOM, MODEL_PRESET_LONG_CONTEXT, MODEL_PRESET_MAX_QUALITY,
     MODEL_PRESET_SPEED, MODEL_ROLES, accepted_model_ids,
     classify_model_preset, model_ids, model_preset_options,
-    model_preset_values, normalize_model_id, repair_model_specs,
+    model_preset_values, normalize_model_id, repair_model_specs, model_options,
 )
 
 
@@ -35,6 +35,26 @@ def test_catalog():
     # Repair models must stay inside the catalogue the chat UI offers.
     for spec in repair_model_specs():
         assert spec["model"] in accepted_model_ids(spec["backend"]), spec
+
+
+def test_live_catalog_overlays_labels_and_preserves_pinned_ids():
+    live = [{"id": "opus", "label": "Opus 5.5"},
+            {"id": "claude-opus-5", "label": "Opus 5"},
+            {"id": "new-family", "label": "New family"}]
+    options = dict((model, label) for label, model in model_options("claude", live))
+    assert options["opus"] == "Opus 5.5"
+    assert options["opus[1m]"] == "Opus 5.5 (1M context)"
+    assert options["claude-opus-5"] == "Opus 5"
+    assert normalize_model_id("claude", "claude-opus-5", live) == "claude-opus-5"
+    assert normalize_model_id("claude", "new-family", live) == "new-family"
+    assert len(model_ids("claude", live)) == len(set(model_ids("claude", live)))
+
+
+def test_live_codex_catalog_controls_selectable_choices():
+    live = [{"id": "gpt-6.1-sol", "label": "GPT-6.1 Sol"}]
+    assert model_ids("codex", live) == ("gpt-6.1-sol",)
+    assert model_ids("codex", []) == ()
+    assert model_ids("codex")  # offline defaults remain without a saved catalog
 
 
 def test_presets_are_backend_aware():

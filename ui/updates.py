@@ -31,6 +31,7 @@ class UpdateWorker(QThread):
 class UpdateManager(QObject):
     changed = pyqtSignal()
     notice = pyqtSignal(object)
+    models_changed = pyqtSignal()
 
     def __init__(self, profile_dir, plugin_dir, parent=None):
         super().__init__(parent)
@@ -74,6 +75,13 @@ class UpdateManager(QObject):
         if self._closed:
             return
         self.report = report
+        for backend, row in report.get("models", {}).items():
+            if "entries" in row:
+                try:
+                    config.set_discovered_models(backend, row["entries"])
+                except (OSError, ValueError) as exc:
+                    report["errors"].append(f"Could not save {backend} model choices: {type(exc).__name__}.")
+        self.models_changed.emit()
         for error in report.get("errors", []):
             QgsApplication.messageLog().logMessage(error, "QGent updates", Qgis.Warning)
         fresh = set(report.get("notices", [])) - self._shown
@@ -128,7 +136,7 @@ class UpdatesPanel(QWidget):
         layout.addWidget(self.automatic)
         explanation = QLabel(
             "Checks run in the background, at most daily (hourly retries after errors). "
-            "Public release checks contact GitHub; Codex model discovery uses your installed CLI. "
+            "Public release checks contact GitHub; model lists refresh from your installed Claude and Codex CLIs. "
             "No paid model request is made. Save this preference with OK.")
         explanation.setWordWrap(True)
         layout.addWidget(explanation)

@@ -2,6 +2,8 @@
 """QGent model catalogue shared by QGIS and the stdlib External Doctor."""
 from __future__ import annotations
 
+import re
+
 
 MODEL_ROLES = ("supervisor", "worker", "light")
 CUSTOM_MODEL_SENTINEL = "__qgent_custom_model__"
@@ -13,11 +15,8 @@ LIGHT_ROLE_TOOLTIP = (
     "Scout/verifier are read-and-report; bigger models only slow them down."
 )
 
-# Neither Claude Code 2.1.223 nor Codex CLI 0.146.1 exposes a headless model
-# enumeration command, so this list is curated. ``model_watch`` discovers ids
-# the installed CLIs know about and flags anything newer than what is listed
-# here. ``id`` is the single ordinary chat value; ``aliases`` are accepted only
-# for migration/validation and are never duplicate UI rows.
+# Offline defaults. Structured CLI catalogs refresh labels and add choices
+# through the optional discovered rows below; selected model IDs stay unchanged.
 MODEL_CATALOG = {
     "claude": (
         {
@@ -143,14 +142,51 @@ MODEL_IDS_BY_BACKEND = {
 }
 
 
-def model_ids(backend):
+def clean_model_entries(entries):
+    """Validate structured catalog rows before exposing or persisting them."""
+    if not isinstance(entries, list):
+        raise ValueError("Model catalog must be a list")
+    rows = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ValueError("Invalid model catalog entry")
+        model_id = entry.get("id")
+        label = entry.get("label")
+        if (not isinstance(model_id, str)
+                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/\[\]-]{0,159}", model_id)
+                or model_id == CUSTOM_MODEL_SENTINEL
+                or not isinstance(label, str) or not label.strip()):
+            raise ValueError("Invalid model id or label")
+        rows.setdefault(model_id, {"id": model_id, "label": " ".join(label.split())[:200]})
+    return list(rows.values())
+
+
+def catalog_entries(backend, discovered=None):
+    """Overlay current CLI labels, then append exact new IDs without duplicates."""
+    live = {row["id"]: row for row in clean_model_entries(discovered or [])}
+    rows = []
+    for entry in MODEL_CATALOG.get(str(backend or "").lower(), ()):
+        if str(backend).lower() == "codex" and discovered is not None and entry["id"] not in live:
+            continue
+        row = dict(entry)
+        if row["id"] in live:
+            row["label"] = live[row["id"]]["label"]
+        elif row["id"].endswith("[1m]") and row["id"][:-4] in live:
+            row["label"] = live[row["id"][:-4]]["label"] + " (1M context)"
+        rows.append(row)
+    existing = {row["id"] for row in rows}
+    rows.extend(row for key, row in live.items() if key not in existing)
+    return tuple(rows)
+
+
+def model_ids(backend, discovered=None):
     """Return exactly one selectable CLI id for each curated model."""
-    return MODEL_IDS_BY_BACKEND.get(str(backend or "").lower(), ())
+    return tuple(row["id"] for row in catalog_entries(backend, discovered))
 
 
-def model_options(backend):
+def model_options(backend, discovered=None):
     """Return ``(friendly label, CLI id)`` rows for the selected backend."""
-    entries = MODEL_CATALOG.get(str(backend or "").lower(), ())
+    entries = catalog_entries(backend, discovered)
     return tuple((entry["label"], entry["id"]) for entry in entries)
 
 
@@ -201,20 +237,24 @@ def classify_model_preset(backend, choices):
     return MODEL_PRESET_CUSTOM
 
 
-def accepted_model_ids(backend):
+def accepted_model_ids(backend, discovered=None):
     """Return curated ids plus known full-id aliases, without duplicate rows."""
     values = []
-    for entry in MODEL_CATALOG.get(str(backend or "").lower(), ()):
+    for entry in catalog_entries(backend, discovered):
         values.append(entry["id"])
         values.extend(entry.get("aliases") or ())
     return tuple(values)
 
 
-def normalize_model_id(backend, value):
+def normalize_model_id(backend, value, discovered=None):
     """Map a known id/full-id alias to its single selectable CLI id."""
     text = str(value or "").strip()
-    for entry in MODEL_CATALOG.get(str(backend or "").lower(), ()):
-        if text == entry["id"] or text in (entry.get("aliases") or ()):
+    entries = catalog_entries(backend, discovered)
+    # A pinned version listed by the CLI takes precedence over an old alias.
+    if text in {entry["id"] for entry in entries}:
+        return text
+    for entry in entries:
+        if text in (entry.get("aliases") or ()):
             return entry["id"]
     return ""
 
