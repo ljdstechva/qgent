@@ -290,6 +290,7 @@ QPushButton#QgentQueueAdd, QPushButton#QgentStopCurrent {{
 QPushButton#QgentQueueStop:hover, QPushButton#QgentStopCurrent:hover {{
     color: {t.danger}; border-color: {t.danger};
 }}
+QPushButton#QgentStopCurrent {{ color: {t.danger}; border-color: {t.danger}; }}
 QPushButton#QgentQueueSecondary:checked {{
     color: {t.warn}; border-color: {t.warn};
 }}
@@ -305,6 +306,9 @@ QPushButton:disabled {{ color: {t.text_muted}; background: {t.surface_hi}; }}
 
 /* ---- activity strip ---- */
 #QgentActivity QLabel {{ color: {t.text_muted}; font-size: 10px; background: transparent; }}
+#QgentActivity QLabel#QgentWorkStatus {{
+    color: {t.text}; font-size: 11px; font-weight: 600;
+}}
 #QgentActivity QLabel#QgentFastIndicator {{
     color: {t.accent}; font-size: 10px; font-weight: 700;
     background: transparent;

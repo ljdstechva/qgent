@@ -274,8 +274,8 @@ class ClaudeCodeBackend(AgentBackend):
         stderr = bytes(proc.readAllStandardError()).decode("utf-8", "replace")
         self.last_stderr = stderr
         final = self._final
-        failed = ((final is not None and bool(final.get("is_error")))
-                  or (final is None and exit_code != 0))
+        failed = (exit_code != 0
+                  or (final is not None and bool(final.get("is_error"))))
         failure_text = "\n".join(filter(None, (
             str((final or {}).get("result") or ""), stderr.strip())))
         retry_fable = (
@@ -295,14 +295,13 @@ class ClaudeCodeBackend(AgentBackend):
             return
 
         self.busy_changed.emit(False)
-        if final is not None:
-            if final.get("is_error"):
-                self.error.emit(final.get("result") or "Agent reported an error.")
-            else:
-                self._commit_tentative_session()
-                self.done.emit(final)
+        if final is not None and final.get("is_error"):
+            self.error.emit(final.get("result") or "Agent reported an error.")
         elif exit_code != 0:
             self.error.emit(stderr.strip() or f"Claude CLI exited with code {exit_code}.")
+        elif final is not None:
+            self._commit_tentative_session()
+            self.done.emit(final)
         else:
             self.error.emit("Turn ended without a result event.")
         self._clear_turn_state()

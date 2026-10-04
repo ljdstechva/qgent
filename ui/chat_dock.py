@@ -41,11 +41,11 @@ from qgis.core import (
 from .. import config
 from ..agent.question_detect import detect_question
 from . import theme
-from .animations import fade_in, smooth_scroll_to_bottom, staggered, ThinkingDots
+from .animations import fade_in, smooth_scroll_to_bottom, staggered
 from .widgets import (
     MessageBubble, ToolChip, SubagentChip, ApprovalCard, ChatInput,
     SendStopButton, SuggestionChip, ContextStrip, StatusNote, QueuePanel,
-    SnapshotCard, QuestionCard, FastModeButton,
+    SnapshotCard, QuestionCard, FastModeButton, WorkStatusIcon,
 )
 from .settings_dialog import SettingsDialog
 from ..bridge.qgis_socket_server import BridgeServer
@@ -315,6 +315,7 @@ class ChatDock(QDockWidget):
         self._tray_icon = None
         self._notification_events = []
         self._attached_files = []
+        self._work_state = "idle"
 
         # token coalescing
         self._stream_buf = ""
@@ -413,16 +414,27 @@ class ChatDock(QDockWidget):
         arow = QHBoxLayout(activity)
         arow.setContentsMargins(4, 0, 4, 0)
         arow.setSpacing(6)
-        self.dots = ThinkingDots(self.t.accent)
-        self.dots.hide()
-        arow.addWidget(self.dots)
+        self.work_icon = WorkStatusIcon(self.t)
+        arow.addWidget(self.work_icon)
+        self.work_label = QLabel("Ready")
+        self.work_label.setObjectName("QgentWorkStatus")
+        arow.addWidget(self.work_label)
         self.status = QLabel("")
-        arow.addWidget(self.status)
-        arow.addStretch(1)
+        self.status.setTextFormat(Qt.PlainText)
+        self.status.setWordWrap(True)
+        arow.addWidget(self.status, 1)
         self.fast_indicator = QLabel("⚡ FAST")
         self.fast_indicator.setObjectName("QgentFastIndicator")
         self.fast_indicator.setToolTip("Fast mode is active.")
         arow.addWidget(self.fast_indicator)
+        self.stop_turn_btn = QPushButton("Stop")
+        self.stop_turn_btn.setObjectName("QgentStopCurrent")
+        self.stop_turn_btn.setAccessibleName("Stop current turn")
+        self.stop_turn_btn.setToolTip("Stop the current agent turn")
+        self.stop_turn_btn.setCursor(Qt.PointingHandCursor)
+        self.stop_turn_btn.clicked.connect(self.on_stop)
+        self.stop_turn_btn.hide()
+        arow.addWidget(self.stop_turn_btn)
         outer.addWidget(activity)
 
         # -- sequential task queue ----------------------------------------
@@ -460,12 +472,6 @@ class ChatDock(QDockWidget):
         self.queue_add_btn.setToolTip("Add this request without starting it")
         self.queue_add_btn.clicked.connect(self.add_composer_to_queue)
         crow.addWidget(self.queue_add_btn, 0, Qt.AlignBottom)
-        self.stop_turn_btn = QPushButton("Stop")
-        self.stop_turn_btn.setObjectName("QgentStopCurrent")
-        self.stop_turn_btn.setCursor(Qt.PointingHandCursor)
-        self.stop_turn_btn.clicked.connect(self.on_stop)
-        self.stop_turn_btn.hide()
-        crow.addWidget(self.stop_turn_btn, 0, Qt.AlignBottom)
         self.fast_mode_btn = FastModeButton(self.t)
         self.fast_mode_btn.setChecked(bool(config.get(config.K_FAST_MODE)))
         self.fast_mode_btn.toggled.connect(self._on_fast_mode_toggled)
@@ -790,14 +796,56 @@ class ChatDock(QDockWidget):
 
     # -- activity helpers ---------------------------------------------------
     def _set_activity(self, text):
+        if (self._work_state not in ("stopped", "error")
+                and (self._live_questions or self._detected_questions
+                     or self._live_approvals)):
+            text = ""
         self.status.setText(text)
 
-    def _show_thinking(self):
-        self.dots.start()
-        self.status.setText("Thinking…")
+    def _set_work_state(self, state, detail=""):
+        self._work_state = state
+        if state in ("stopped", "error"):
+            self._stop_running_chips(detail or WorkStatusIcon.LABELS[state])
+        self._set_activity(detail)
+        self._refresh_work_status()
 
-    def _hide_thinking(self):
-        self.dots.halt()
+    def _stop_running_chips(self, reason):
+        if self._last_tool_chip is not None and not self._last_tool_finished:
+            result = "Error: " + reason
+            self._last_tool_chip.set_result(result)
+            self._last_tool_finished = True
+            self._history_append(
+                "tool", event="finished", tool_id=self._last_tool_id,
+                name=self._last_tool_name, args=self._last_tool_args,
+                result=result)
+        for name, chip in self._subagent_chips.items():
+            if chip._shimmer_pos is not None:
+                chip.set_static("interrupted")
+                info = self._subagent_history.get(name) or {}
+                self._history_append(
+                    "subagent", event="interrupted", name=name,
+                    subagent_id=info.get("id"), reason=reason)
+
+    def _refresh_work_status(self):
+        # busy=False can arrive before OR after done/error, depending on the
+        # backend. Only terminal handlers may declare success or failure.
+        state = self._work_state
+        if state not in ("stopped", "error"):
+            if self._live_questions or self._detected_questions:
+                state = "question"
+            elif self._live_approvals:
+                state = "approval"
+        if state in ("question", "approval"):
+            self.status.clear()
+        elif state == "working" and self.work_icon.state in ("question", "approval"):
+            self._set_activity("Continuing…")
+        self.work_icon.set_state(state)
+        label = WorkStatusIcon.LABELS[state]
+        self.work_label.setText(label)
+        self.work_label.setAccessibleName("QGent: " + label)
+        self.stop_turn_btn.setVisible(
+            not self._queue_running
+            and (self._work_state == "working" or state == "question"))
 
     # ======================================================================
     # Persistent project history
@@ -1207,6 +1255,10 @@ class ChatDock(QDockWidget):
                             self._record_text(record, "answer"),
                             self._record_text(record, "answer_kind", "typed"),
                             restored=True)
+                    elif record.get("event") == "cancelled":
+                        detected_open.pop(question_id, None)
+                        card.set_cancelled(
+                            self._record_text(record, "reason"), restored=True)
                     else:
                         detected_open[question_id] = (index, record)
                 elif kind == "question":
@@ -1287,6 +1339,7 @@ class ChatDock(QDockWidget):
                     chip.set_static("interrupted")
         finally:
             self._history_replaying = False
+        self._refresh_work_status()
         QTimer.singleShot(0, lambda: smooth_scroll_to_bottom(self.scroll))
         return True
 
@@ -1418,6 +1471,8 @@ class ChatDock(QDockWidget):
         previous_kind = self._backend_kind
         previous_session = None
         if self.backend is not None:
+            if self._active_turn is not None:
+                self.on_stop()
             self._cancel_pending_questions("Backend replaced")
             self._cancel_pending_approvals("Backend replaced")
             previous_session = self.backend.session_id
@@ -1457,6 +1512,7 @@ class ChatDock(QDockWidget):
         if (preserve_session and previous_session
                 and previous_kind == backend_kind):
             self.backend.session_id = previous_session
+        self._on_busy_changed(self.backend.is_busy())
 
     # ======================================================================
     # Sending
@@ -1521,6 +1577,7 @@ class ChatDock(QDockWidget):
         self.queue_panel.set_paused(self._queue_pause_after_current)
         busy = bool(self.backend is not None and self.backend.is_busy())
         self.action_btn.set_busy(self._queue_running or busy)
+        self._refresh_work_status()
 
     def _queue_task(self, task_id):
         return next((task for task in self._queue_tasks
@@ -1706,6 +1763,7 @@ class ChatDock(QDockWidget):
         if not text:
             return False
         if self.backend is None:
+            self._set_work_state("error", "Backend is unavailable.")
             if queue_task is not None:
                 self._continue_queue_after_error(
                     queue_task, "Backend is unavailable.")
@@ -1717,6 +1775,7 @@ class ChatDock(QDockWidget):
                 "No CLI found. Install the selected agent CLI and log in, "
                 "then set its path in Settings.")
             self._add_error(message)
+            self._set_work_state("error", "Agent CLI is not configured.")
             if queue_task is not None:
                 self._continue_queue_after_error(queue_task, message)
             return False
@@ -1755,7 +1814,8 @@ class ChatDock(QDockWidget):
         self._last_tool_finished = True
         self._subagent_chips = {}
         self._subagent_history = {}
-        self._show_thinking()
+        self._ignore_next_terminal = False
+        self._set_work_state("working", "Thinking…")
 
         try:
             context_block = build_context_block(
@@ -1811,6 +1871,9 @@ class ChatDock(QDockWidget):
             self._active_turn = None
             self._finish_perf()
             self._add_error(message)
+            self._cancel_pending_questions("Turn failed")
+            self._cancel_pending_approvals("Turn failed")
+            self._set_work_state("error", "Could not start the turn.")
             if queue_task is not None:
                 self._continue_queue_after_error(queue_task, message)
             return False
@@ -1894,7 +1957,7 @@ class ChatDock(QDockWidget):
             self._finish_queue(stopped=True)
             return
         if self._queue_pause_after_current:
-            self._set_activity("Queue paused after the current task.")
+            self._set_work_state("paused", "Queue paused after the current task.")
             return
         batch_ids = set(self._batch_task_ids)
         task = next((item for item in self._queue_tasks
@@ -1969,7 +2032,10 @@ class ChatDock(QDockWidget):
         self._queue_stop_error = ""
         self._sync_fast_mode_ui()
         self._sync_queue_panel()
-        self._set_activity("Queue stopped." if stopped else "Queue complete.")
+        state = ("error" if stop_reason == "error" or (failures and not stopped)
+                 else "stopped" if stopped else "done")
+        self._set_work_state(
+            state, "Queue stopped." if stopped else "Queue complete.")
         if stopped and stop_reason == "error":
             detail = (": " + stop_error) if stop_error else "."
             self._notify_batch_attention(
@@ -1998,16 +2064,16 @@ class ChatDock(QDockWidget):
         task = self._queue_task(task_id)
         self._mark_queue_task(task, "failed", "Stopped by user.")
         self._cancel_pending_questions("Current queue task stopped")
+        self._cancel_detected_questions("Current queue task stopped")
         self._cancel_pending_approvals("Current queue task stopped")
         busy = bool(self.backend is not None and self.backend.is_busy())
         if busy:
             self._ignore_next_terminal = True
             self.backend.cancel()
         self._end_stream()
-        self._hide_thinking()
         self._active_turn = None
         self._finish_perf()
-        self._set_activity("Current queue task stopped.")
+        self._set_work_state("stopped", "Current queue task stopped.")
         QTimer.singleShot(0, self._queue_idle_checkpoint)
 
     def stop_all_queue(self):
@@ -2020,6 +2086,7 @@ class ChatDock(QDockWidget):
         if self.bridge is not None:
             self.bridge.clear_batch_permission_mode()
         self._cancel_pending_questions("Queue stopped")
+        self._cancel_detected_questions("Queue stopped")
         self._cancel_pending_approvals("Queue stopped")
         active_id = (self._active_turn or {}).get("queue_task_id")
         for task in self._queue_tasks:
@@ -2033,10 +2100,10 @@ class ChatDock(QDockWidget):
             self._ignore_next_terminal = True
             self.backend.cancel()
         self._end_stream()
-        self._hide_thinking()
         self._active_turn = None
         self._finish_perf()
         self._sync_queue_panel()
+        self._set_work_state("stopped", "Queue stopped by user.")
         QTimer.singleShot(0, self._queue_idle_checkpoint)
 
     def on_stop(self):
@@ -2046,13 +2113,13 @@ class ChatDock(QDockWidget):
             self._stop_queue_task(task_id)
             return
         self._cancel_pending_questions("Turn stopped")
+        self._cancel_detected_questions("Turn stopped")
+        self._cancel_pending_approvals("Turn stopped")
         if self.backend is not None and self.backend.is_busy():
-            self._cancel_pending_approvals("Turn stopped")
             self._ignore_next_terminal = True
             self.backend.cancel()
         self._end_stream()
-        self._hide_thinking()
-        self._set_activity("Stopped.")
+        self._set_work_state("stopped", "Stopped by user.")
         self._add_status_note("Turn stopped.")
         self._active_turn = None
         self._finish_perf()
@@ -2099,6 +2166,7 @@ class ChatDock(QDockWidget):
         self._build_backend(preserve_session=False)
         self._history_update_session()
         self._clear_messages()
+        self._set_work_state("idle")
         # Attachments belong to the conversation that produced them: they stay
         # available all session, and a new session starts with a clean slate.
         self._attached_files = []
@@ -2145,13 +2213,15 @@ class ChatDock(QDockWidget):
     # Streaming (coalesced)
     # ======================================================================
     def _on_token(self, text):
+        if self._active_turn is None or self._ignore_next_terminal:
+            return
         # TTFT is recorded at signal arrival, before coalescing, so the
         # benchmark metric is unaffected by the 40 ms flush timer.
         if self._perf is not None and self._perf["ttft_ms"] is None:
             self._perf["ttft_ms"] = round((time.monotonic() - self._perf["start"]) * 1000)
         if self._active_turn is not None:
             self._active_turn.setdefault("assistant_parts", []).append(str(text))
-        self._hide_thinking()
+        self._set_activity("Writing response…")
         if self._current_bubble is None:
             self._current_bubble = MessageBubble("assistant", self.t)
             self._add_widget(self._current_bubble)
@@ -2186,6 +2256,8 @@ class ChatDock(QDockWidget):
     # Backend signal handlers
     # ======================================================================
     def _on_tool_call(self, name, args):
+        if self._active_turn is None or self._ignore_next_terminal:
+            return
         if self._perf is not None:
             self._perf["tool_calls"] += 1
         canonical_name = _canonical_qgis_tool_name(name)
@@ -2194,7 +2266,6 @@ class ChatDock(QDockWidget):
             self._active_turn["visual_change_tool_ran"] = True
         self._end_stream()
         self._forget_last_text()
-        self._hide_thinking()
         if self._last_tool_chip is not None and not self._last_tool_finished:
             self._last_tool_chip.mark_done_without_result()
             self._history_append(
@@ -2224,6 +2295,8 @@ class ChatDock(QDockWidget):
         self._set_activity(f"Running {name.replace('mcp__qgis__', '')}…")
 
     def _on_tool_result(self, text):
+        if self._active_turn is None or self._ignore_next_terminal:
+            return
         if self._last_tool_chip is not None:
             self._last_tool_chip.set_result(text)
             self._history_append(
@@ -2244,6 +2317,8 @@ class ChatDock(QDockWidget):
                 text, caption=self._layout_preview_caption(text))
 
     def _on_subagent_event(self, name, status):
+        if self._active_turn is None or self._ignore_next_terminal:
+            return
         if self._active_turn is not None:
             self._active_turn.setdefault("subagent_events", []).append({
                 "name": str(name), "status": str(status),
@@ -2253,7 +2328,6 @@ class ChatDock(QDockWidget):
         if status == "started":
             if self._perf is not None:
                 self._perf["delegations"] += 1
-            self._hide_thinking()
             chip = SubagentChip(name, self.t)
             self._subagent_chips[name] = chip
             subagent_id = secrets.token_hex(8)
@@ -2291,12 +2365,12 @@ class ChatDock(QDockWidget):
         if self._ignore_next_terminal:
             self._ignore_next_terminal = False
             self._end_stream(persist=False)
-            self._hide_thinking()
             QTimer.singleShot(0, self._queue_idle_checkpoint)
             return
         turn = self._active_turn
+        if turn is None:
+            return
         self._end_stream()
-        self._hide_thinking()
         if self._last_tool_chip is not None:
             self._last_tool_chip.mark_done_without_result()
             if not self._last_tool_finished:
@@ -2318,7 +2392,9 @@ class ChatDock(QDockWidget):
                         name=str(name), elapsed_s=round(elapsed, 3))
                     info["finished"] = True
         self._capture_terminal_snapshot(turn)
-        self._set_activity("Ready.")
+        self._cancel_pending_questions("Turn finished")
+        self._cancel_pending_approvals("Turn finished")
+        self._set_work_state("done")
         found = detect_question((turn or {}).get("last_text") or "")
         if found is not None:
             self._show_detected_question(found)
@@ -2335,12 +2411,12 @@ class ChatDock(QDockWidget):
         if self._ignore_next_terminal:
             self._ignore_next_terminal = False
             self._end_stream(persist=False)
-            self._hide_thinking()
             QTimer.singleShot(0, self._queue_idle_checkpoint)
             return
         turn = self._active_turn
+        if turn is None and self._work_state in ("stopped", "error"):
+            return
         self._end_stream()
-        self._hide_thinking()
         if self._should_retry_missing_session(message):
             self._active_turn["fallback_attempted"] = True
             self._active_turn["resumed"] = False
@@ -2348,12 +2424,14 @@ class ChatDock(QDockWidget):
             self._history_update_session()
             self.session_label.setText("new session")
             self._add_status_note("Started a fresh agent session.")
-            self._set_activity("Starting a fresh agent session…")
+            self._set_work_state("working", "Starting a fresh agent session…")
             QTimer.singleShot(0, self._retry_after_missing_session)
             return
         self._add_error(message)
         self._capture_terminal_snapshot(turn)
-        self._set_activity("Error.")
+        self._cancel_pending_questions("Turn failed")
+        self._cancel_pending_approvals("Turn failed")
+        self._set_work_state("error", "Turn failed. See the error above.")
         task_id = (turn or {}).get("queue_task_id")
         task = self._queue_task(task_id) if task_id else None
         self._apply_turn_report(task, turn)
@@ -2411,11 +2489,8 @@ class ChatDock(QDockWidget):
 
     def _on_busy_changed(self, busy):
         self.action_btn.set_busy(bool(busy) or self._queue_running)
-        self.stop_turn_btn.setVisible(bool(busy) and not self._queue_running)
-        if busy:
-            self._show_thinking()
-        else:
-            self._hide_thinking()
+        self._refresh_work_status()
+        if not busy:
             QTimer.singleShot(0, self._queue_idle_checkpoint)
 
     def _on_backend_status_note(self, message):
@@ -2425,7 +2500,9 @@ class ChatDock(QDockWidget):
 
     def _on_bridge_activity(self, tool):
         # Fires from the socket thread (queued); low-noise status hint.
-        self._set_activity(f"QGIS: {tool.replace('mcp__qgis__', '')}")
+        if (self._active_turn is not None and not self._ignore_next_terminal
+                and not self._live_questions and not self._live_approvals):
+            self._set_activity(f"QGIS: {tool.replace('mcp__qgis__', '')}")
 
     # ======================================================================
     # Approval gate
@@ -2459,6 +2536,7 @@ class ChatDock(QDockWidget):
                 card.set_cancelled(
                     ap.get("cancel_reason") or "This approval is no longer active.")
                 self._live_approvals.pop(approval_id, None)
+                self._refresh_work_status()
                 return
             ap["approved"] = approved
             ap["event"].set()
@@ -2466,6 +2544,7 @@ class ChatDock(QDockWidget):
                 "approval", event="decided", approval_id=approval_id,
                 code=code, reasons=reasons, approved=bool(approved))
             self._live_approvals.pop(approval_id, None)
+            self._refresh_work_status()
             if task is not None and task.get("status") == "waiting_approval":
                 task["status"] = "running"
                 self._sync_queue_panel()
@@ -2473,6 +2552,7 @@ class ChatDock(QDockWidget):
         card.decided.connect(decide)
         self._add_widget(card)
         card.attention()
+        self._refresh_work_status()
 
     def _cancel_pending_approvals(self, reason):
         if self.bridge is not None:
@@ -2485,10 +2565,12 @@ class ChatDock(QDockWidget):
                 "approval", event="cancelled", approval_id=approval_id,
                 reason=str(reason))
         self._live_approvals.clear()
+        self._refresh_work_status()
 
     def _on_approval_finished(self, payload):
         approval_id = str(payload.get("approval_id") or "")
         item = self._live_approvals.pop(approval_id, None)
+        self._refresh_work_status()
         if item is None or not payload.get("cancelled"):
             return
         reason = str(payload.get("reason") or "Approval is no longer active.")
@@ -2561,6 +2643,7 @@ class ChatDock(QDockWidget):
 
         card.answered.connect(answer)
         self._add_widget(card)
+        self._refresh_work_status()
 
     def _finalize_question(self, question_id, outcome, answer="",
                            answer_kind="", reason="", resume_queue=True):
@@ -2602,6 +2685,7 @@ class ChatDock(QDockWidget):
                     and self._queue_running):
                 task["status"] = "running"
             self._sync_queue_panel()
+        self._refresh_work_status()
         return True
 
     def _cancel_pending_questions(self, reason):
@@ -2621,7 +2705,18 @@ class ChatDock(QDockWidget):
                 question_id, outcome,
                 answer=str(payload.get("answer") or ""),
                 reason=terminal_reason, resume_queue=False)
+        self._refresh_work_status()
         return tuple(resolved or ())
+
+    def _cancel_detected_questions(self, reason):
+        for question_id, item in list(self._detected_questions.items()):
+            item["card"].set_cancelled(reason)
+            self._history_append(
+                "question", event="cancelled", source="detected",
+                question_id=question_id, question=item["question"],
+                options=list(item["options"]), reason=str(reason))
+        self._detected_questions.clear()
+        self._refresh_work_status()
 
     def _forget_last_text(self):
         if self._active_turn is not None:
@@ -2646,6 +2741,7 @@ class ChatDock(QDockWidget):
             question_id=question_id, question=question,
             options=list(options), allow_other=True)
         self._notify_question_attention(question)
+        self._refresh_work_status()
         return card
 
     def _answer_detected_question(self, question_id, value, answer_kind):
@@ -2678,6 +2774,7 @@ class ChatDock(QDockWidget):
             question_id=question_id, question=item["question"],
             options=list(item["options"]), allow_other=True, answer=answer,
             answer_kind=answer_kind)
+        self._refresh_work_status()
         return True
 
     def _on_question_finished(self, payload):
@@ -2829,6 +2926,10 @@ class ChatDock(QDockWidget):
         self.msg_layout.insertWidget(self.msg_layout.count() - 1, widget)
         if animate and not self._history_replaying:
             fade_in(widget)
+            # New cards are otherwise shown on a later layout pass, after the
+            # scroll animation has already captured the old scrollbar range.
+            widget.show()
+            self.msg_container.adjustSize()
             smooth_scroll_to_bottom(self.scroll)
 
     def _clear_messages(self):
@@ -2908,6 +3009,7 @@ class ChatDock(QDockWidget):
         if self.bridge is not None:
             self.bridge.clear_batch_permission_mode()
         self._queue_running = False
+        self._set_work_state("idle")
         if self._layer_selection_model is not None:
             try:
                 self._layer_selection_model.selectionChanged.disconnect(

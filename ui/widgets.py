@@ -16,8 +16,8 @@ import os
 import time
 from datetime import datetime
 
-from qgis.PyQt.QtCore import Qt, QTimer, QUrl, pyqtSignal
-from qgis.PyQt.QtGui import QColor, QDesktopServices, QPixmap
+from qgis.PyQt.QtCore import Qt, QTimer, QUrl, QPointF, pyqtSignal
+from qgis.PyQt.QtGui import QColor, QDesktopServices, QPainter, QPen, QPixmap, QPolygonF
 from qgis.PyQt.QtWidgets import (
     QFrame, QLabel, QVBoxLayout, QHBoxLayout, QToolButton, QTextBrowser,
     QPushButton, QPlainTextEdit, QWidget, QSizePolicy, QApplication,
@@ -40,6 +40,79 @@ FAST_MODE_TOOLTIP = (
 
 def _now():
     return datetime.now().strftime("%H:%M")
+
+
+class WorkStatusIcon(Spinner):
+    """Persistent turn indicator; vector shapes also work without emoji fonts."""
+
+    LABELS = {
+        "idle": "Ready", "working": "Working", "done": "Done",
+        "question": "Needs answer", "approval": "Needs approval",
+        "paused": "Paused", "stopped": "Stopped", "error": "Error",
+    }
+
+    def __init__(self, tokens, parent=None):
+        super().__init__(tokens.ok, diameter=20, parent=parent)
+        self.t = tokens
+        self.state = "idle"
+        self.setObjectName("QgentWorkStatusIcon")
+        self.set_state("idle")
+
+    def set_state(self, state):
+        label = self.LABELS[state]
+        self.state = state
+        self.setAccessibleName("QGent: " + label)
+        self.setToolTip("QGent: " + label)
+        self._sync_animation()
+        self.update()
+
+    def _sync_animation(self):
+        if self.state == "working" and self.isVisible() and motion_enabled():
+            if self._anim.state() != self._anim.Running:
+                self._anim.start()
+        else:
+            self.stop()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._sync_animation()
+
+    def hideEvent(self, event):
+        self.stop()
+        super().hideEvent(event)
+
+    def paintEvent(self, event):
+        if self.state == "working":
+            return super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        color = (self.t.ok if self.state == "done" else
+                 self.t.danger if self.state in ("stopped", "error") else
+                 self.t.text_muted if self.state == "idle" else self.t.warn)
+        pen = QPen(QColor(color), 2.2)
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        painter.setPen(pen)
+        if self.state == "done":
+            painter.drawPolyline(QPolygonF([
+                QPointF(4, 10), QPointF(8, 14), QPointF(16, 5)]))
+        elif self.state in ("stopped", "error"):
+            painter.setBrush(QColor(color))
+            painter.drawPolygon(QPolygonF([QPointF(x, y) for x, y in (
+                (7, 2), (13, 2), (18, 7), (18, 13),
+                (13, 18), (7, 18), (2, 13), (2, 7))]))
+            painter.setPen(QPen(QColor("white"), 2))
+            painter.drawLine(6, 10, 14, 10)
+        elif self.state == "idle":
+            painter.drawEllipse(6, 6, 8, 8)
+        else:
+            painter.setBrush(QColor(color))
+            painter.drawPolygon(QPolygonF([
+                QPointF(10, 2), QPointF(18, 17), QPointF(2, 17)]))
+            painter.setPen(QPen(QColor("#1F2328"), 2))
+            painter.drawLine(10, 7, 10, 11)
+            painter.drawPoint(10, 14)
+        painter.end()
 
 
 # ===========================================================================

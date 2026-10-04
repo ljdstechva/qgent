@@ -10,7 +10,7 @@
 
 <p align="center">
   <img alt="QGIS 3.28+" src="https://img.shields.io/badge/QGIS-3.28%2B-589632?logo=qgis&logoColor=white">
-  <img alt="QGent 0.4.0" src="https://img.shields.io/badge/QGent-0.4.0-0f9d91">
+  <img alt="QGent 0.4.1" src="https://img.shields.io/badge/QGent-0.4.1-0f9d91">
   <img alt="Claude Code or Codex" src="https://img.shields.io/badge/backend-Claude%20Code%20%7C%20Codex-5b5bd6">
   <img alt="Experimental" src="https://img.shields.io/badge/status-experimental-orange">
 </p>
@@ -122,6 +122,27 @@ Then:
 
 The **New** button starts a clean conversation for the current project. The
 export menu beside it writes the persisted conversation as Markdown or PDF.
+
+### Work status and stopping
+
+The status strip above the composer stays visible throughout each turn:
+
+- **Green rotating circle — Working:** QGent is thinking, writing, or using tools.
+- **Green check — Done:** the turn completed successfully.
+- **Yellow warning — Needs answer / Needs approval:** respond to the question
+  card or review the approval. A paused queue also shows a yellow warning.
+- **Red stop — Stopped / Error:** you stopped the turn, or it failed. Error
+  details remain in the conversation; a queue containing failed tasks also
+  ends with an error indicator.
+
+Use **Stop** beside the status to cancel the current turn, including a turn
+waiting for your answer. Queues retain their per-task **Stop** and **Stop all**
+controls. A stopped turn cannot be marked done by late backend events.
+With **Reduce motion** enabled, the working circle stays still.
+
+Stop terminates the agent process and releases waiting questions/approvals.
+It does not undo changes already made. A synchronous PyQGIS operation running
+on QGIS's main thread must return before the interface can process a click.
 
 ### Backends
 
@@ -295,7 +316,7 @@ project information.
 
 ## Status and feedback
 
-QGent 0.4.0 is experimental. CLI event formats and flags can change, and the
+QGent 0.4.1 is experimental. CLI event formats and flags can change, and the
 plugin has not yet been published in the official QGIS plugin repository.
 
 Bug reports and focused feature requests are welcome in

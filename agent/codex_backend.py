@@ -58,7 +58,8 @@ class CodexBackend(AgentBackend):
         self.cli_path = cli_path
         self.proc = None
         self.parser = StreamJsonParser()
-        self._got_result = False
+        self._final = None
+        self._failure = ""
         self.last_model_id = ""
         self.last_model_was_custom = False
 
@@ -70,7 +71,8 @@ class CodexBackend(AgentBackend):
             self.error.emit("A turn is already running.")
             return
         self.parser.reset()
-        self._got_result = False
+        self._final = None
+        self._failure = ""
         self.last_stderr = ""
 
         model_choice = config.validate_model_choice("codex", "supervisor")
@@ -218,20 +220,30 @@ class CodexBackend(AgentBackend):
                     self.tool_result.emit(str(out))
             return
         if etype in ("turn.completed", "thread.completed"):
-            self._got_result = True
             terminal = dict(evt)
             terminal["qgent_usage"] = normalized_usage("codex", evt)
-            self.done.emit(terminal)
+            self._final = terminal
+            # Older CLIs also use `error` for reconnect attempts. A later
+            # completion supersedes those; subsequent failures still win.
+            self._failure = ""
+        elif etype in ("turn.failed", "error"):
+            error = evt.get("error") or evt.get("message") or "Codex turn failed."
+            self._failure = str(error.get("message") or error) if isinstance(
+                error, dict) else str(error)
 
     def _on_finished(self, exit_code, _status):
-        self.busy_changed.emit(False)
-        stderr = ""
-        if self.proc is not None:
-            stderr = bytes(self.proc.readAllStandardError()).decode("utf-8", "replace")
-        self.last_stderr = stderr
-        if not self._got_result:
-            if exit_code != 0:
-                self.error.emit(stderr.strip() or f"Codex CLI exited with code {exit_code}.")
-            else:
-                self.done.emit({"result": ""})
+        if self.proc is None:
+            return
+        self._on_stdout()
+        stderr = bytes(self.proc.readAllStandardError()).decode("utf-8", "replace")
+        self.proc.deleteLater()
         self.proc = None
+        self.last_stderr = stderr
+        self.busy_changed.emit(False)
+        if self._failure or exit_code != 0:
+            self.error.emit(self._failure or stderr.strip()
+                            or f"Codex CLI exited with code {exit_code}.")
+        elif self._final is not None:
+            self.done.emit(self._final)
+        else:
+            self.error.emit("Turn ended without a result event.")
