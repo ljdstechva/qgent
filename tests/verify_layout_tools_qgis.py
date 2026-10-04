@@ -20,6 +20,12 @@ PLUGIN_PARENT = os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))))
 sys.path.insert(0, PLUGIN_PARENT)
 
+OUT = os.path.abspath(sys.argv[1] if len(sys.argv) > 1
+                      else tempfile.mkdtemp(prefix="qgent_layout_"))
+os.makedirs(OUT, exist_ok=True)
+# Keep QGIS's own settings out of any real profile.
+os.environ["QGIS_CUSTOM_CONFIG_PATH"] = os.path.join(OUT, "qgis-profile")
+
 from qgis.core import (  # noqa: E402
     QgsApplication, QgsFeature, QgsGeometry, QgsPointXY, QgsProject,
     QgsVectorLayer,
@@ -33,9 +39,6 @@ package = os.path.basename(os.path.dirname(os.path.dirname(
 layout_tools = __import__(package + ".bridge.layout_tools",
                           fromlist=["layout_tools"])
 
-OUT = os.path.abspath(sys.argv[1] if len(sys.argv) > 1
-                      else tempfile.mkdtemp(prefix="qgent_layout_"))
-os.makedirs(OUT, exist_ok=True)
 TEMPLATE_DIR = os.path.join(OUT, "composer_templates")
 shutil.rmtree(TEMPLATE_DIR, ignore_errors=True)
 # Point the "user template folder" at scratch space: the real profile's

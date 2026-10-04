@@ -118,7 +118,9 @@ def layout_reasons(args):
     if action == "delete":
         reasons.append("deletes print layout {!r} from the project".format(
             str(args.get("layout") or "")))
-    elif action == "build" and (spec.get("replace") or args.get("replace"))             and str(spec.get("mode") or "create") == "create":
+    elif (action == "build"
+          and (spec.get("replace") or args.get("replace"))
+          and str(spec.get("mode") or "create") == "create"):
         reasons.append(
             "replaces print layout {!r} if it already exists".format(
                 str(spec.get("name") or "")))
