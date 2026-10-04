@@ -631,6 +631,8 @@ def lint_layout(layout):
     boxes = []
     annotation_bands = []
     tolerance = _LINT_TOLERANCE_MM
+    map_rects = [item.mapRectToScene(item.rect()) for item in layout.items()
+                 if isinstance(item, QgsLayoutItemMap) and item.isVisible()]
     for item in layout.items():
         if not _is_content_item(item) or not item.isVisible():
             continue
@@ -660,6 +662,10 @@ def lint_layout(layout):
                     f"{have.width():.1f} x {have.height():.1f} mm — text is "
                     "clipped; enlarge the box, shrink the font, or shorten "
                     "the text")
+            elif needed is not None and _boxed(item, rect, map_rects):
+                issue = _mostly_empty(label, "label", needed[1], have.height())
+                if issue:
+                    issues.append(issue)
         elif isinstance(item, QgsLayoutItemLegend) and not item.resizeToContents():
             needed = _legend_size(layout, item)
             have = layout.convertToLayoutUnits(item.sizeWithUnits())
@@ -672,6 +678,11 @@ def lint_layout(layout):
                     f"{have.width():.1f} x {have.height():.1f} mm — entries "
                     "are cut off; enlarge it, add columns, shrink fonts, or "
                     "exclude layers")
+            elif needed is not None and _boxed(item, rect, map_rects):
+                issue = _mostly_empty(label, "legend", needed.height(),
+                                      have.height())
+                if issue:
+                    issues.append(issue)
         elif isinstance(item, QgsLayoutItemMap):
             if not item.crs().isValid():
                 issues.append(f"map '{label}' has no valid CRS")
@@ -757,6 +768,36 @@ def _missing_essentials(layout, page_rects):
         issues.append("no north arrow — add one unless the user asked for "
                       "none or the map has a graticule and is north-up")
     return issues
+
+
+def _boxed(item, rect, map_rects):
+    """Whether unused space inside an item is visible on the page.
+
+    A frame always shows it. A fill shows it unless it is white on paper:
+    legends get a white background by default, invisible on a white panel
+    but a blank plate once it sits over a map.
+    """
+    if item.frameEnabled():
+        return True
+    if not item.hasBackground() or item.backgroundColor().alpha() == 0:
+        return False
+    if item.backgroundColor().lightness() < 250:
+        return True
+    return any(rect.intersects(map_rect) for map_rect in map_rects)
+
+
+def _mostly_empty(label, kind, needed, have):
+    """An outlined box at least twice as tall as what it holds looks unfinished.
+
+    Only framed or filled items are judged: an open text block or legend can
+    leave room for later content without anyone seeing it.
+    """
+    if have - needed < 12.0 or needed >= 0.5 * have:
+        return ""
+    hint = ("set resize_to_contents" if kind == "legend"
+            else "shrink the box or drop its frame/background")
+    return (f"{kind} '{label}' is a framed {have:.0f} mm tall box holding "
+            f"{needed:.0f} mm of content — {hint}")
 
 
 def _within(rect, page, tolerance):

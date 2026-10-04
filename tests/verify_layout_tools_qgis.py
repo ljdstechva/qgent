@@ -225,6 +225,14 @@ for needle in ("no legend", "no scale bar", "no north arrow"):
         needle, bare["issues"])
 step("lint missing essentials", [issue for issue in bare["issues"]
                                  if issue.startswith("no ")])
+roomy = tools.manage({"action": "build", "spec": {
+    "name": "Bare map", "mode": "update",
+    "items": [{"id": "boxed_caption", "type": "label", "text": "Caption",
+               "rect": [10, 150, 100, 40], "frame": True}]}})
+assert any("boxed_caption" in issue and "framed" in issue
+           for issue in roomy["issues"]), roomy["issues"]
+step("lint mostly empty box", [issue for issue in roomy["issues"]
+                               if "boxed_caption" in issue])
 tools.manage({"action": "delete", "layout": "Bare map"})
 
 # 8. Export a PDF and refuse to overwrite it silently.
