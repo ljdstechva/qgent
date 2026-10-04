@@ -52,7 +52,11 @@ TOOLS = [
             "stdout (truncated). Pre-injected names: iface, QgsProject, "
             "processing, and all qgis.core.Qgs* classes. This is the workhorse "
             "— prefer ONE script that does a whole workflow over many small "
-            "calls. Destructive code triggers a user approval prompt."
+            "calls. Destructive code triggers a user approval prompt. "
+            "Layers created with the 'memory' provider are volatile: saving "
+            "the project stores their definition but NOT their features, so "
+            "they reload empty and a QGIS crash loses them outright. Write "
+            "anything worth keeping to a GeoPackage instead."
         ),
         "inputSchema": {
             "type": "object",

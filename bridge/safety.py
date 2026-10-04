@@ -34,6 +34,31 @@ _DESTRUCTIVE_ATTR_PATHS = {
 # with no prompt because bare "write" was dropped from _DESTRUCTIVE_CALLS.
 _PROJECT_NAMES = {"project", "proj", "qgs_project", "qgsproject"}
 
+# Calls that take the whole QGIS process down with a native access violation
+# rather than a Python exception. These are refused outright instead of being
+# offered to the approval gate: approving one still loses the QGIS session, so
+# a prompt would only ask the user to consent to a crash. Each entry carries
+# the working alternative, which is what the model actually needs back.
+#
+# previewAsImage: builds its QgsRasterViewPort with invalid source/destination
+# CRSs. QgsHueSaturationFilter::block short-circuits to `return mInput->block()`
+# while saturation is 0, so the mismatch is harmless — switch the filter on and
+# it instead walks a pixel buffer whose geometry does not match the viewport and
+# reads out of bounds. Reproduced on QGIS 3.44 (exit 0xC0000005) with an Esri XYZ
+# basemap and with a plain local GeoTIFF; saturation is the trigger, brightness
+# alone is safe. The layer's filter state is invisible to a static scan, so the
+# call is refused outright rather than conditionally.
+_FATAL_CALLS = {
+    "previewAsImage": (
+        "QgsRasterLayer.previewAsImage() hard-crashes QGIS with an access "
+        "violation when the layer's hueSaturationFilter is active (non-zero "
+        "saturation, grayscale, or colorize) — confirmed on QGIS 3.44 for both "
+        "XYZ basemaps and local GeoTIFFs. Render the layer with "
+        "QgsMapRendererSequentialJob over a QgsMapSettings whose setLayers([layer]) "
+        "you set, then save job.renderedImage()."
+    ),
+}
+
 _REGEX_FALLBACK = re.compile(
     r"\b("
     r"os\.remove|os\.unlink|os\.rmdir|shutil\.rmtree|shutil\.move|"
@@ -41,6 +66,31 @@ _REGEX_FALLBACK = re.compile(
     r"QgsVectorFileWriter|commitChanges|\.write\s*\(|dropField|deleteAttributes?"
     r")\b"
 )
+
+
+def fatal_calls(code):
+    """Return reasons this code would hard-crash the QGIS process.
+
+    Separate from :func:`scan` because the outcome differs: ``scan`` results
+    reach the user as an approval prompt, these are refused at the bridge.
+    Matching is on the bare attribute name — the same convention as
+    ``_DESTRUCTIVE_CALLS`` — since these names are unique in the PyQGIS API.
+    """
+    hits = []
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        # Unparseable code still reaches exec(), which still crashes. Fall back
+        # to a substring match rather than letting it through.
+        hits = [why for name, why in _FATAL_CALLS.items() if name in code]
+    else:
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr in _FATAL_CALLS):
+                hits.append(_FATAL_CALLS[node.func.attr])
+    seen = set()
+    return [h for h in hits if not (h in seen or seen.add(h))]
 
 
 def scan(code):

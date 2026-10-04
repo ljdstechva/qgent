@@ -163,7 +163,14 @@ class BridgeServer(QObject):
             return True, self._ask_user(question, options, allow_other)
 
         if tool == "execute_pyqgis":
-            denied = self._maybe_gate(args.get("code", ""))
+            code = args.get("code", "")
+            # Crash guard first: a fatal call must never reach the approval
+            # gate, because approving it still kills the QGIS session.
+            fatal = safety.fatal_calls(code)
+            if fatal:
+                return False, ("BLOCKED — this would crash QGIS, not raise an "
+                               "exception. " + " ".join(fatal))
+            denied = self._maybe_gate(code)
             if denied is not None:
                 return False, denied
 

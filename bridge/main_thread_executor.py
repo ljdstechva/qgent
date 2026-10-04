@@ -23,18 +23,25 @@ from qgis.PyQt.QtCore import QObject, pyqtSlot
 from .. import config
 
 
+# Tools that can change project state, and so are worth a checkpoint first.
+_MUTATING_TOOLS = ("execute_pyqgis", "run_processing")
+
+
 class MainThreadExecutor(QObject):
     """Slot target that runs one bridge tool call per invocation."""
 
     def __init__(self, iface, parent=None):
         super().__init__(parent)
         self.iface = iface
+        self._checkpoint_signature = None
 
-    # The single entry point. ``payload`` = {tool, args, result, error, event}.
+    # The single entry point. ``payload`` = {tool, args, result, event}.
     @pyqtSlot(object)
     def handle(self, payload):
         tool = payload.get("tool")
         args = payload.get("args") or {}
+        if tool in _MUTATING_TOOLS:
+            self._checkpoint_memory_layers()
         try:
             handler = getattr(self, f"_tool_{tool}", None)
             if handler is None:
@@ -47,6 +54,61 @@ class MainThreadExecutor(QObject):
             event = payload.get("event")
             if event is not None:
                 event.set()
+
+    # -- crash survival -----------------------------------------------------
+    @staticmethod
+    def checkpoint_path():
+        """Where memory-layer checkpoints are mirrored, inside the profile."""
+        from qgis.core import QgsApplication
+
+        return os.path.join(QgsApplication.qgisSettingsDirPath(),
+                            "qgent", "checkpoints", "memory_layers.gpkg")
+
+    def _checkpoint_memory_layers(self):
+        """Mirror in-RAM scratch layers to a GeoPackage before mutating work.
+
+        QGIS keeps a memory layer's *definition* in the .qgz but not its
+        features — reloading a saved project yields the layer with zero rows —
+        so "just save the project" does not protect this work. A native crash
+        (QGIS dying on an access violation or heap corruption) otherwise takes
+        every unsaved memory layer with it, which is how one crash cost a whole
+        afternoon of digitising on 2026-08-07.
+
+        Best-effort by design: this runs before the call the user actually
+        asked for, so no failure here may block or slow that call.
+        """
+        from qgis.core import (QgsProject, QgsVectorFileWriter,
+                               QgsCoordinateTransformContext)
+
+        try:
+            layers = [lyr for lyr in QgsProject.instance().mapLayers().values()
+                      if getattr(lyr, "providerType", lambda: "")() == "memory"
+                      and lyr.isValid()]
+            if not layers:
+                return
+            # ponytail: feature counts as the change signature — cheap, and it
+            # misses pure attribute/geometry edits. Hash the features if that
+            # ever matters more than the write cost.
+            signature = tuple(sorted((lyr.id(), lyr.featureCount())
+                                     for lyr in layers))
+            if signature == self._checkpoint_signature:
+                return
+
+            path = self.checkpoint_path()
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            context = QgsCoordinateTransformContext()
+            for index, lyr in enumerate(layers):
+                options = QgsVectorFileWriter.SaveVectorOptions()
+                options.driverName = "GPKG"
+                options.layerName = lyr.name()
+                options.actionOnExistingFile = (
+                    QgsVectorFileWriter.CreateOrOverwriteFile if index == 0
+                    else QgsVectorFileWriter.CreateOrOverwriteLayer)
+                QgsVectorFileWriter.writeAsVectorFormatV3(
+                    lyr, path, context, options)
+            self._checkpoint_signature = signature
+        except Exception:  # noqa: BLE001 - never break the real tool call
+            pass
 
     # -- helpers ------------------------------------------------------------
     def _cap(self):
@@ -132,6 +194,11 @@ class MainThreadExecutor(QObject):
             },
             "canvas_crs": canvas.mapSettings().destinationCrs().authid(),
         }
+        # Only advertised once it exists, so it is always actionable: after a
+        # QGIS crash this is where the previous session's memory layers are.
+        checkpoint = self.checkpoint_path()
+        if os.path.exists(checkpoint):
+            ctx["memory_layer_checkpoint"] = checkpoint
         return self._truncate(json.dumps(ctx, indent=2))
 
     def _tool_run_processing(self, args):
