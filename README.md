@@ -10,7 +10,7 @@
 
 <p align="center">
   <img alt="QGIS 3.28+" src="https://img.shields.io/badge/QGIS-3.28%2B-589632?logo=qgis&logoColor=white">
-  <img alt="QGent 0.3.1" src="https://img.shields.io/badge/QGent-0.3.1-0f9d91">
+  <img alt="QGent 0.4.0" src="https://img.shields.io/badge/QGent-0.4.0-0f9d91">
   <img alt="Claude Code or Codex" src="https://img.shields.io/badge/backend-Claude%20Code%20%7C%20Codex-5b5bd6">
   <img alt="Experimental" src="https://img.shields.io/badge/status-experimental-orange">
 </p>
@@ -32,6 +32,13 @@ API key in the plugin.
   you meant, even if the UI selection changes later.
 - Add or style layers, run buffers and overlays, inspect features, create map
   layouts, and export GIS deliverables.
+- Work the Layout Manager on its own: design print layouts from page-adaptive
+  presets, check them with a design lint and a rendered preview, save them as
+  reusable `.qpt` templates in your **User templates** list, and fill a
+  template's `[placeholders]` for each new map.
+- Turn every question the agent asks — a structured clarification or a
+  question left at the end of its reply — into an answerable card, and get
+  your attention when QGIS is in the background.
 - Require inline approval for file writes, deletes, edit commits, overwrites,
   and other destructive code.
 - Restore per-project chat history after QGIS restarts.
@@ -53,6 +60,9 @@ Apply categorized symbology to landuse using the class field.
 
 Build an A3 vicinity map centred on 14.676, 121.044 with a scale bar,
 north arrow, legend, and PDF export.
+
+Design an A3 landscape template for flood hazard maps and save it to my
+Layout Manager.
 ```
 
 ## Screenshots
@@ -123,6 +133,36 @@ export menu beside it writes the persisted conversation as Markdown or PDF.
 QGent keeps model choices separately for each backend. Its Codex invocation
 preserves the normal authentication home while suppressing unrelated global
 MCP and plugin configuration for the QGent session.
+
+## Layout templates
+
+QGent drives print layouts through two tools instead of ad-hoc PyQGIS:
+
+- `layout_info` (read-only) lists layouts and every template QGIS can see,
+  describes a layout or `.qpt` with a design lint (clipped text, overflowing
+  legends or tables, items off the page or on the map's grid labels, overlaps,
+  unfilled placeholders), and renders a page to PNG. Previews appear in the
+  chat.
+- `manage_layouts` builds a layout from a JSON spec or a preset
+  (`side_panel`, `title_strip`, `report_figure`; A6–A0, Letter, ANSI, Arch),
+  saves it as a template, instantiates templates with `[placeholder]` fill
+  and map overrides, exports PDF/PNG/SVG, and opens the Layout Designer.
+
+Templates are saved to `<QGIS profile>/composer_templates`, so they appear
+under **Project ▸ Layout Manager ▸ User templates**. Their `[Map Title]`-style
+placeholders follow the same convention as the Map Template Builder plugin.
+Replacing a layout, overwriting a template or export, and deleting a layout
+all require your approval.
+
+## Questions from the agent
+
+When the agent needs a decision it asks through `ask_user`, which QGent shows
+as a card with choices. If a reply instead ends with a question ("Should I
+export it as PDF or PNG?"), QGent detects it and shows the same kind of card,
+with buttons for listed options, either/or choices, or yes/no. Clicking a
+choice or typing in the composer sends your reply. A question that is still
+open when QGIS restarts stays answerable. If QGIS is in the background, the
+dock is raised and QGIS flashes in the taskbar.
 
 ## Updates and new models
 
@@ -221,10 +261,11 @@ QGIS dock
   main-thread executor ──► PyQGIS / QGIS Processing / live project
 ```
 
-QGent exposes six coarse MCP tools: `execute_pyqgis`,
+QGent exposes nine coarse MCP tools: `execute_pyqgis`,
 `get_project_context`, `run_processing`, `get_layer_features`,
-`render_map_snapshot`, and `stat_path`. Coarse calls let an agent complete a
-whole GIS step without a large catalogue of fragile, fine-grained tools.
+`render_map_snapshot`, `stat_path`, `layout_info`, `manage_layouts`, and
+`ask_user`. Coarse calls let an agent complete a whole GIS step without a
+large catalogue of fragile, fine-grained tools.
 
 ## Repository layout
 
@@ -254,7 +295,7 @@ project information.
 
 ## Status and feedback
 
-QGent 0.3.1 is experimental. CLI event formats and flags can change, and the
+QGent 0.4.0 is experimental. CLI event formats and flags can change, and the
 plugin has not yet been published in the official QGIS plugin repository.
 
 Bug reports and focused feature requests are welcome in
