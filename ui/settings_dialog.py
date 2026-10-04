@@ -15,6 +15,7 @@ from ..doctor import DoctorService, DoctorWorker, repair_model_options
 from ..doctor_core import (
     ensure_recovery_entrypoint, launch_detached, write_doctor_request)
 from .widgets import FAST_MODE_TOOLTIP
+from .updates import UpdatesPanel
 
 
 class SettingsDialog(QDialog):
@@ -59,6 +60,8 @@ class SettingsDialog(QDialog):
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_general_tab(), "General")
         self.tabs.addTab(self._build_doctor_tab(), "Doctor")
+        self.updates = UpdatesPanel(self.doctor_context.get("update_manager"), self)
+        self.tabs.addTab(self.updates, "Updates")
         outer.addWidget(self.tabs, 1)
 
         self.buttons = QDialogButtonBox(
@@ -540,6 +543,7 @@ class SettingsDialog(QDialog):
             config.K_SHOW_MAP_SNAPSHOTS,
             self.show_map_snapshots.isChecked())
         config.set(config.K_REDUCE_MOTION, self.reduce_motion.isChecked())
+        config.set(config.K_CHECK_UPDATES, self.updates.automatic.isChecked())
         self.accept()
 
     # ==================================================================
@@ -739,4 +743,4 @@ class SettingsDialog(QDialog):
         super().closeEvent(event)
 
     def shutdown(self):
-        pass
+        self.updates.shutdown()

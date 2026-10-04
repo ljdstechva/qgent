@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """Detect models the installed CLIs know about but QGent's catalogue does not.
 
-Neither Claude Code nor Codex CLI exposes a headless model list, so the model
-ids are read straight out of the shipped executable.  That is deliberately a
+This fallback reads model ids out of the shipped executable. The update
+checker also uses the structured catalog in recent Codex builds. This is a
 *discovery* signal, not a catalogue: a hit only means "the CLI mentions this
 id", so anything reported here is surfaced as a dismissible notice for a human
 to confirm, never auto-selected.
@@ -113,6 +113,19 @@ def scan_cli_models(path, backend):
     return found
 
 
+def models_in_text(backend, text):
+    """Find candidate ids in release notes; mentions are not access guarantees."""
+    pattern = _PATTERNS.get(backend)
+    if pattern is None:
+        return set()
+    values = set()
+    for match in pattern.finditer(str(text).encode("utf-8")):
+        parsed = parse_model_id(backend, match.group(0).decode("ascii"))
+        if parsed:
+            values.add(parsed[0])
+    return values
+
+
 def known_models(backend):
     """Return ``{family: max version}`` for everything the catalogue offers."""
     families = {}
@@ -205,7 +218,8 @@ def check_models(profile_dir, cli_paths, force=False):
         if not signature:
             record["error"] = "CLI not found."
         elif not force and cached.get("signature") == signature:
-            record["new"] = list(cached.get("new") or [])
+            # Re-filter after a QGent catalog update, even with the same CLI.
+            record["new"] = new_model_ids(backend, cached.get("new") or [])
         else:
             try:
                 record["new"] = new_model_ids(
@@ -221,16 +235,18 @@ def check_models(profile_dir, cli_paths, force=False):
     state["scans"] = scans
     state["schema_version"] = SCHEMA_VERSION
     state["last_check"] = datetime.now().astimezone().isoformat(timespec="seconds")
+    state_error = ""
     try:
         save_state(profile_dir, state)
-    except OSError:
-        pass
+    except OSError as exc:
+        state_error = f"Could not save model scan results: {type(exc).__name__}."
     return {
         "schema_version": SCHEMA_VERSION,
         "timestamp": state["last_check"],
         "backends": backends,
         "all_new": all_new,
         "new": [value for value in all_new if value not in acknowledged],
+        "state_error": state_error,
     }
 
 
@@ -248,9 +264,9 @@ def summary_text(report):
     """One-line human summary used by the Doctor and the message bar."""
     report = report or {}
     if report.get("new"):
-        return ("Models the installed CLIs offer but QGent does not list yet: "
+        return ("Possible models mentioned by the installed CLIs, not yet listed in QGent: "
                 + ", ".join(report["new"])
-                + ". Add them in model_catalog.py, or dismiss this notice.")
+                + ". Confirm access, then use Settings > Models > Advanced > Custom….")
     errors = [f"{backend}: {item['error']}"
               for backend, item in (report.get("backends") or {}).items()
               if item.get("error")]
@@ -258,4 +274,4 @@ def summary_text(report):
                  for backend in MODEL_CATALOG)
     if errors:
         return f"No new models found ({listed} listed). " + "; ".join(errors)
-    return f"No new models found; QGent's {listed} listed models are current."
+    return f"No new models found in installed CLI strings ({listed} listed); this does not check upstream releases."

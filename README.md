@@ -10,7 +10,7 @@
 
 <p align="center">
   <img alt="QGIS 3.28+" src="https://img.shields.io/badge/QGIS-3.28%2B-589632?logo=qgis&logoColor=white">
-  <img alt="QGent 0.2.0" src="https://img.shields.io/badge/QGent-0.2.0-0f9d91">
+  <img alt="QGent 0.3.0" src="https://img.shields.io/badge/QGent-0.3.0-0f9d91">
   <img alt="Claude Code or Codex" src="https://img.shields.io/badge/backend-Claude%20Code%20%7C%20Codex-5b5bd6">
   <img alt="Experimental" src="https://img.shields.io/badge/status-experimental-orange">
 </p>
@@ -124,6 +124,36 @@ QGent keeps model choices separately for each backend. Its Codex invocation
 preserves the normal authentication home while suppressing unrelated global
 MCP and plugin configuration for the QGent session.
 
+## Updates and new models
+
+QGent checks for updates in the background after startup and once per day
+while QGIS remains open. Open **Settings → Updates** or
+**Plugins → QGent → Check for updates…** for an immediate check. The Updates
+tab also lets you disable automatic checks (save with **OK**) or dismiss the
+current notifications; a later release or newly detected model is still reported.
+
+Checks compare QGent's installed version against `metadata.txt` on this
+repository's `main` branch and Claude Code/Codex versions against their latest
+stable GitHub releases. New model candidates come from installed CLI strings,
+release-note mentions and, on recent Codex versions, `codex debug models`.
+Older Codex builds fall back to the string scan and show that limitation.
+Hidden Codex catalog entries are excluded. Discovery does not guarantee account
+access; review the provider's release notes and use **General → Models →
+Advanced → Custom…** for a supported ID that is not in QGent's list yet.
+
+The feature notifies you and links to installation/release instructions; it
+does not install software or change your selected models. Checks make public
+requests to GitHub and use the installed CLI for model discovery, without a
+paid model request. Results and dismissals are saved under the QGIS profile's
+`qgent/updates.json`. Network failures are shown and logged; automatic checks
+retry after an hour. Updating QGent or either CLI invalidates cached results.
+
+For a QGent update, close QGIS, back up the existing plugin folder, then follow
+the [installation instructions](#installation) to replace that folder with the
+new version (or pull this repository if installed with Git). Reopen QGIS and
+check **Settings → Updates**. Claude Code and Codex release links are provided
+in the same tab for their own installation methods.
+
 ## Safety model
 
 - `execute_pyqgis` payloads are AST-scanned before execution.
@@ -215,7 +245,7 @@ project information.
 
 ## Status and feedback
 
-QGent 0.2.0 is experimental. CLI event formats and flags can change, and the
+QGent 0.3.0 is experimental. CLI event formats and flags can change, and the
 plugin has not yet been published in the official QGIS plugin repository.
 
 Bug reports and focused feature requests are welcome in

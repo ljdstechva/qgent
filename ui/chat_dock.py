@@ -1323,6 +1323,7 @@ class ChatDock(QDockWidget):
         return {
             "plugin_dir": self.plugin_dir,
             "profile_dir": QgsApplication.qgisSettingsDirPath(),
+            "update_manager": getattr(self, "update_manager", None),
             "mcp_config_path": self._mcp_config_path(),
             "codex_config_path": os.path.join(
                 os.path.expanduser("~"), ".codex", "config.toml"),
@@ -2041,10 +2042,18 @@ class ChatDock(QDockWidget):
         self._post_welcome()
 
     def open_settings(self):
+        self._open_settings()
+
+    def open_update_settings(self):
+        self._open_settings(updates=True)
+
+    def _open_settings(self, updates=False):
         if self._queue_running:
             self._set_activity("Stop the running queue before changing settings.")
             return
         dlg = SettingsDialog(self, doctor_context=self._doctor_context())
+        if updates:
+            dlg.tabs.setCurrentWidget(dlg.updates)
         busy_signal = self.backend.busy_changed if self.backend is not None else None
         if busy_signal is not None:
             busy_signal.connect(dlg.set_chat_busy)

@@ -11,14 +11,13 @@ from collections import deque
 from datetime import datetime
 import os
 
-from qgis.PyQt.QtCore import Qt, QTimer
+from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction, QPushButton
 from qgis.core import Qgis, QgsApplication
 
-from .doctor import ModelWatchWorker
-from .model_watch import acknowledge
 from .ui.chat_dock import ChatDock
+from .ui.updates import UpdateManager
 
 PLUGIN_DIR = os.path.dirname(__file__)
 
@@ -33,7 +32,9 @@ class QgisCopilotPlugin:
         self.menu = "&QGent"
         self.diagnostic_logs = deque(maxlen=200)
         self._message_log = None
-        self._model_watch = None
+        self.updates = None
+        self.update_action = None
+        self._update_notice = None
 
     # -- QGIS hooks ---------------------------------------------------------
     def initGui(self):  # noqa: N802
@@ -47,13 +48,28 @@ class QgisCopilotPlugin:
 
         self.iface.addToolBarIcon(self.action)
         self.iface.addPluginToMenu(self.menu, self.action)
-        # Let QGIS finish starting before touching the CLIs.
-        QTimer.singleShot(5000, self._start_model_watch)
+        self.updates = UpdateManager(
+            QgsApplication.qgisSettingsDirPath(), PLUGIN_DIR,
+            self.iface.mainWindow())
+        self.updates.notice.connect(self._on_update_notice)
+        self.updates.changed.connect(self._sync_update_notice)
+        self.update_action = QAction("Check for updates…", self.iface.mainWindow())
+        self.update_action.triggered.connect(self._open_updates)
+        self.iface.addPluginToMenu(self.menu, self.update_action)
+        self.updates.start()
 
     def unload(self):
-        if self._model_watch is not None:
-            self._model_watch.wait(5000)
-            self._model_watch = None
+        if self.updates is not None:
+            self.updates.close()
+            self.updates.deleteLater()
+            self.updates = None
+        if self._update_notice is not None:
+            self.iface.messageBar().popWidget(self._update_notice)
+            self._update_notice = None
+        if self.update_action is not None:
+            self.iface.removePluginMenu(self.menu, self.update_action)
+            self.update_action.deleteLater()
+            self.update_action = None
         if self._message_log is not None:
             try:
                 self._message_log.messageReceived.disconnect(
@@ -71,66 +87,51 @@ class QgisCopilotPlugin:
             self.iface.removePluginMenu(self.menu, self.action)
             self.action = None
 
-    # -- model watch --------------------------------------------------------
-    def _start_model_watch(self):
-        """Check once per QGIS session whether the CLIs ship unlisted models.
-
-        Cached per CLI build, so a session that follows no CLI update reads a
-        small JSON file and does no scanning at all.
-        """
-        if self.action is None or self._model_watch is not None:
-            return
-        try:
-            worker = ModelWatchWorker(
-                QgsApplication.qgisSettingsDirPath(),
-                self.iface.mainWindow())
-            worker.completed.connect(self._on_model_watch)
-            worker.failed.connect(self._on_model_watch_failed)
-            worker.finished.connect(self._clear_model_watch)
-            worker.finished.connect(worker.deleteLater)
-            self._model_watch = worker
-            worker.start()
-        except Exception as exc:
-            self._on_model_watch_failed(f"{type(exc).__name__}: {exc}")
-
-    def _clear_model_watch(self):
-        self._model_watch = None
-
-    def _on_model_watch_failed(self, message):
-        QgsApplication.messageLog().logMessage(
-            f"QGent model watch failed: {message}", "QGent", Qgis.Warning)
-
-    def _on_model_watch(self, report):
-        model_ids = list((report or {}).get("new") or [])
-        if not model_ids or self.action is None:
+    # -- updates ------------------------------------------------------------
+    def _on_update_notice(self, report):
+        if self.action is None:
             return
         bar = self.iface.messageBar()
+        if self._update_notice is not None:
+            bar.popWidget(self._update_notice)
+        releases = sum(row.get("update", False) for row in report["releases"].values())
+        models = sum(len(row.get("ids", [])) for row in report["models"].values())
         item = bar.createMessage(
-            "QGent",
-            "New AI model(s) available in your CLI: " + ", ".join(model_ids))
-        settings = QPushButton("Open QGent settings")
-        settings.clicked.connect(lambda: self._open_settings_from_notice(item))
+            "QGent updates",
+            f"{releases} software update(s), {models} unlisted model candidate(s).")
+        settings = QPushButton("Review updates")
+        settings.clicked.connect(self._open_updates)
         dismiss = QPushButton("Dismiss")
-        dismiss.clicked.connect(
-            lambda: self._dismiss_model_notice(item, model_ids))
+        dismiss.clicked.connect(self._dismiss_update_notice)
         item.layout().addWidget(settings)
         item.layout().addWidget(dismiss)
-        bar.pushWidget(item, Qgis.Info)
+        self._update_notice = item
+        item.destroyed.connect(lambda: self._notice_destroyed(item))
+        bar.pushWidget(item, Qgis.Info, 0)
 
-    def _open_settings_from_notice(self, item):
-        self.iface.messageBar().popWidget(item)
+    def _notice_destroyed(self, item):
+        if self._update_notice is item:
+            self._update_notice = None
+
+    def _sync_update_notice(self):
+        if (self._update_notice is not None and self.updates is not None
+                and self.updates.report and not self.updates.report.get("notices")):
+            self.iface.messageBar().popWidget(self._update_notice)
+            self._update_notice = None
+
+    def _open_updates(self, _checked=False):
         if self.action is not None:
             self.action.setChecked(True)
         self.toggle_panel(True)
+        if self.updates is not None:
+            self.updates.check(force=True)
         if self.dock is not None:
-            self.dock.open_settings()
+            self.dock.open_update_settings()
 
-    def _dismiss_model_notice(self, item, model_ids):
-        self.iface.messageBar().popWidget(item)
-        try:
-            acknowledge(QgsApplication.qgisSettingsDirPath(), model_ids)
-        except OSError as exc:
-            self._on_model_watch_failed(f"{type(exc).__name__}: {exc}")
+    def _dismiss_update_notice(self):
+        if self.updates is not None and self.updates.dismiss() and self._update_notice is not None:
+            self.iface.messageBar().popWidget(self._update_notice)
+            self._update_notice = None
 
     # -- behaviour ----------------------------------------------------------
     def toggle_panel(self, checked):
@@ -138,6 +139,7 @@ class QgisCopilotPlugin:
             self.dock = ChatDock(
                 self.iface, PLUGIN_DIR,
                 diagnostic_logs=self.diagnostic_logs)
+            self.dock.update_manager = self.updates
             self.dock.visibilityChanged.connect(self._sync_action_state)
             self.iface.addDockWidget(Qt.RightDockWidgetArea, self.dock)
         self.dock.setVisible(checked)
