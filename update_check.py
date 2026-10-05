@@ -348,7 +348,7 @@ def report_text(report):
                   "Saved model choices stay available after restart. Unconfirmed strings are not added.",
                   "Model discovery does not guarantee account access.",
                   "Existing model choices stay as selected. No software is installed by this check.",
-                  "For QGent, follow its installation link and replace the plugin while QGIS is closed."])
+                  "Use Install update and restart QGent above to install a newer QGent version."])
     if report["errors"]:
         lines.extend(["", "Checks needing attention:", *report["errors"]])
     return "\n".join(lines)

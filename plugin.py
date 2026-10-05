@@ -11,13 +11,14 @@ from collections import deque
 from datetime import datetime
 import os
 
-from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtCore import Qt, QTimer
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction, QPushButton
 from qgis.core import Qgis, QgsApplication
 
 from .ui.chat_dock import ChatDock
-from .ui.updates import UpdateManager
+from .ui.updates import UpdateManager, restart_with_update
+from .update_install import discard_update
 
 PLUGIN_DIR = os.path.dirname(__file__)
 
@@ -53,6 +54,9 @@ class QgisCopilotPlugin:
             self.iface.mainWindow())
         self.updates.notice.connect(self._on_update_notice)
         self.updates.changed.connect(self._sync_update_notice)
+        self.updates.changed.connect(self._sync_install_state)
+        self.updates.install_requested.connect(self._install_update)
+        self.updates.install_ready.connect(self._install_ready)
         self.update_action = QAction("Check for updates…", self.iface.mainWindow())
         self.update_action.triggered.connect(self._open_updates)
         self.iface.addPluginToMenu(self.menu, self.update_action)
@@ -88,6 +92,51 @@ class QgisCopilotPlugin:
             self.action = None
 
     # -- updates ------------------------------------------------------------
+    def _update_blocker(self):
+        dock = self.dock
+        if dock is None:
+            return ""
+        if (dock._active_turn is not None or dock._queue_running
+                or (dock.backend is not None and dock.backend.is_busy())):
+            return "Finish or stop the active QGent task before installing."
+        if (any(task.get("status") == "queued" for task in dock._queue_tasks)
+                or dock.input.toPlainText().strip() or dock._attached_files):
+            return "Send or clear the draft and pending queue items before restarting QGent."
+        return ""
+
+    def _sync_install_state(self):
+        if self.updates is None:
+            return
+        if self.dock is not None:
+            self.dock.setEnabled(not self.updates.installing)
+        if self.update_action is not None:
+            self.update_action.setEnabled(not self.updates.installing)
+        if self.updates.error and not self.updates.installing:
+            self.iface.messageBar().pushMessage(
+                "QGent updates", self.updates.error, level=Qgis.Warning, duration=15)
+
+    def _install_update(self, version):
+        reason = self._update_blocker()
+        if reason:
+            self.updates._failed(reason)
+            return
+        self.updates.install(version)
+        if self.updates.installing:
+            self.iface.messageBar().pushMessage(
+                "QGent update", "Downloading and checking the update. QGent will restart automatically.",
+                level=Qgis.Info, duration=10)
+
+    def _install_ready(self, prepared):
+        reason = self._update_blocker()
+        if reason:
+            discard_update(prepared)
+            self.updates.installing = False
+            self.updates._failed(reason)
+            return
+        iface, plugin_dir = self.iface, self.updates.plugin_dir
+        # The manager's thread has finished; no Settings callback remains on the stack.
+        QTimer.singleShot(0, lambda: restart_with_update(iface, plugin_dir, prepared))
+
     def _on_update_notice(self, report):
         if self.action is None:
             return

@@ -2,7 +2,7 @@
 """General settings and Doctor UI for QGent."""
 import os
 
-from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtCore import Qt, QTimer
 from qgis.PyQt.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QFileDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout, QLabel,
@@ -66,6 +66,7 @@ class SettingsDialog(QDialog):
         self.tabs.addTab(self._build_general_tab(), "General")
         self.tabs.addTab(self._build_doctor_tab(), "Doctor")
         self.updates = UpdatesPanel(self.doctor_context.get("update_manager"), self)
+        self.updates.install_requested.connect(self._install_update)
         self.tabs.addTab(self.updates, "Updates")
         outer.addWidget(self.tabs, 1)
 
@@ -576,6 +577,18 @@ class SettingsDialog(QDialog):
         config.set(config.K_REDUCE_MOTION, self.reduce_motion.isChecked())
         config.set(config.K_CHECK_UPDATES, self.updates.automatic.isChecked())
         self.accept()
+
+    def _install_update(self):
+        manager = self._update_manager
+        if not self.updates.install_button.isEnabled() or manager is None:
+            return
+        if self._chat_busy or self._long_operation_running():
+            self.updates.status.setText("Finish the active QGent task or diagnostics before installing.")
+            return
+        version = manager.report["releases"]["qgent"]["latest"]
+        self._save_and_accept()
+        # Let the modal Settings loop and its signal cleanup unwind first.
+        QTimer.singleShot(0, lambda: manager.install_requested.emit(version))
 
     # ==================================================================
     # Doctor

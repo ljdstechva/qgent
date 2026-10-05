@@ -10,7 +10,7 @@
 
 <p align="center">
   <img alt="QGIS 3.28+" src="https://img.shields.io/badge/QGIS-3.28%2B-589632?logo=qgis&logoColor=white">
-  <img alt="QGent 0.4.1" src="https://img.shields.io/badge/QGent-0.4.1-0f9d91">
+  <img alt="QGent 0.5.0" src="https://img.shields.io/badge/QGent-0.5.0-0f9d91">
   <img alt="Claude Code or Codex" src="https://img.shields.io/badge/backend-Claude%20Code%20%7C%20Codex-5b5bd6">
   <img alt="Experimental" src="https://img.shields.io/badge/status-experimental-orange">
 </p>
@@ -211,18 +211,33 @@ If a CLI cannot provide its catalog, QGent keeps the last saved choices and show
 the error. Discovery does not guarantee account access. **Custom…** remains
 available for an explicitly chosen raw model ID.
 
-The feature notifies you and links to installation/release instructions; it
-does not install software or change your selected models. Checks make public
+Checks notify you without installing software or changing selected models. They make public
 requests to GitHub and use the installed CLI for model discovery, without a
 paid model request. Results and dismissals are saved under the QGIS profile's
 `qgent/updates.json`. Network failures are shown and logged; automatic checks
 retry after an hour. Updating QGent or either CLI invalidates cached results.
 
-For a QGent update, close QGIS, back up the existing plugin folder, then follow
-the [installation instructions](#installation) to replace that folder with the
-new version (or pull this repository if installed with Git). Reopen QGIS and
-check **Settings → Updates**. Claude Code and Codex release links are provided
-in the same tab for their own installation methods.
+When a newer QGent version is available, click **Install update and restart
+QGent** in **Settings → Updates**. This saves Settings, downloads the checked
+version from this repository, and automatically restarts the QGent panel.
+QGIS and your project stay open. Finish active tasks and diagnostics, and send
+or clear drafts and pending queue items first. QGent is temporarily disabled
+while the update downloads; QGIS remains usable.
+
+The installer pins the download to a GitHub commit, validates the archive,
+version, QGIS compatibility and Python syntax, then keeps the previous plugin
+under your profile's `qgent/updates/update-*/previous`. Settings and chat history
+stay in the profile; runtime configuration is preserved. If the new plugin
+fails to load, QGent restores the previous version and reports the failure.
+Backups are retained, including any local files or `.git` directory. A Git
+installation becomes a ZIP installation; its original checkout remains in the
+backup. Development checkouts outside the active profile are never replaced.
+
+For manual recovery, close QGIS and copy the retained `previous` folder back
+to the original plugin location. Older QGent versions without this button can
+use the [installation instructions](#installation) while QGIS is closed.
+Claude Code and Codex retain their own installation methods via the release
+links in the same tab.
 
 ## Safety model
 
